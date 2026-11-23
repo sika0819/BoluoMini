@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>波萝小程序</title>
+  <style>
+    html,body{margin:0;height:100%;background:#111;overflow:hidden}
+    #boot{position:fixed;inset:0;width:100%;height:100%;object-fit:fill;z-index:0;background:#111}
+    #boluo,#ui{position:fixed;touch-action:none;background:transparent}
+    #boluo{inset:0;width:100vw;height:100vh;z-index:1}
+    #ui{z-index:2}
+    #fps{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9;margin:0;padding:6px 14px;border-radius:999px;background:rgba(0,0,0,.45);color:#fff;font:600 22px/1.2 sans-serif;pointer-events:none}
+  </style>
+</head>
+<body>
+  <p id="fps">-- fps</p>
+  <video id="boot" playsinline muted loop></video>
+  <canvas id="boluo"></canvas>
+  <canvas id="ui"></canvas>
+  <script>
+(function () {
+  var path = location.pathname
+  var dir = path.endsWith('/') ? path : path.slice(0, path.lastIndexOf('/') + 1)
+  if (dir === '/') return
+  var prefix = dir.replace(/\/$/, '')
+  function fix(url) {
+    return (typeof url === 'string' && url.charAt(0) === '/' && url.charAt(1) !== '/') ? prefix + url : url
+  }
+  function patch(proto) {
+    var desc = Object.getOwnPropertyDescriptor(proto, 'src')
+    if (!desc || !desc.set || !desc.get) return
+    Object.defineProperty(proto, 'src', {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get: function () { return desc.get.call(this) },
+      set: function (value) { desc.set.call(this, fix(value)) },
+    })
+  }
+  patch(HTMLImageElement.prototype)
+  patch(HTMLAudioElement.prototype)
+  patch(HTMLVideoElement.prototype)
+  var origFetch = window.fetch
+  if (origFetch) {
+    window.fetch = function (input, init) {
+      if (typeof input === 'string') return origFetch.call(this, fix(input), init)
+      return origFetch.call(this, input, init)
+    }
+  }
+})()
+</script>
+<script src="game.js?v=52"></script>
+</body>
+</html>
