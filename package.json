@@ -1,0 +1,15 @@
+{
+  "name": "boluo-mini",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "node tools/build.mjs --env=dev",
+    "build:dev": "node tools/build.mjs --env=dev",
+    "build:test": "node tools/build.mjs --env=test",
+    "build:product": "node tools/build.mjs --env=product",
+    "serve": "node tools/serve.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.2"
+  }
+}
