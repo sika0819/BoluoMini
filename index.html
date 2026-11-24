@@ -2,10 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content" />
   <title>波萝小程序</title>
   <style>
-    html,body{margin:0;height:100%;background:#111;overflow:hidden}
+    html,body{margin:0;height:100%;width:100%;background:#111;overflow:hidden;position:fixed;inset:0}
     #boot{position:fixed;inset:0;width:100%;height:100%;object-fit:fill;z-index:0;background:#111}
     #boluo,#ui{position:fixed;touch-action:none;background:transparent}
     #boluo{inset:0;width:100vw;height:100vh;z-index:1}
@@ -19,36 +19,47 @@
   <canvas id="boluo"></canvas>
   <canvas id="ui"></canvas>
   <script>
-(function () {
-  var path = location.pathname
-  var dir = path.endsWith('/') ? path : path.slice(0, path.lastIndexOf('/') + 1)
-  if (dir === '/') return
-  var prefix = dir.replace(/\/$/, '')
-  function fix(url) {
-    return (typeof url === 'string' && url.charAt(0) === '/' && url.charAt(1) !== '/') ? prefix + url : url
-  }
-  function patch(proto) {
-    var desc = Object.getOwnPropertyDescriptor(proto, 'src')
-    if (!desc || !desc.set || !desc.get) return
-    Object.defineProperty(proto, 'src', {
-      configurable: true,
-      enumerable: desc.enumerable,
-      get: function () { return desc.get.call(this) },
-      set: function (value) { desc.set.call(this, fix(value)) },
-    })
-  }
-  patch(HTMLImageElement.prototype)
-  patch(HTMLAudioElement.prototype)
-  patch(HTMLVideoElement.prototype)
-  var origFetch = window.fetch
-  if (origFetch) {
-    window.fetch = function (input, init) {
-      if (typeof input === 'string') return origFetch.call(this, fix(input), init)
-      return origFetch.call(this, input, init)
-    }
-  }
-})()
-</script>
-<script src="game.js?v=52"></script>
+    (function () {
+      var path = location.pathname
+      var dir = path.endsWith('/') ? path : path.slice(0, path.lastIndexOf('/') + 1)
+      if (dir === '/') return
+      var prefix = dir.replace(/\/$/, '')
+      function fix(url) {
+        if (typeof url !== 'string' || url.charAt(0) !== '/' || url.charAt(1) === '/') return url
+        if (url === prefix || url.indexOf(prefix + '/') === 0) return url
+        return prefix + url
+      }
+      function patchSrc(proto) {
+        var desc = Object.getOwnPropertyDescriptor(proto, 'src')
+        if (!desc || !desc.set) return
+        Object.defineProperty(proto, 'src', {
+          configurable: true,
+          enumerable: true,
+          get: function () { return desc.get.call(this) },
+          set: function (value) { desc.set.call(this, fix(value)) },
+        })
+      }
+      patchSrc(HTMLImageElement.prototype)
+      patchSrc(HTMLMediaElement.prototype)
+      var origFetch = window.fetch
+      window.fetch = function (input, init) {
+        return origFetch.call(this, typeof input === 'string' ? fix(input) : input, init)
+      }
+      if (window.FontFace) {
+        var Orig = window.FontFace
+        function Patched(family, source, descriptors) {
+          if (typeof source === 'string') {
+            source = source.replace(/url\(\s*(['"]?)(\/[^)'"]+)\1\s*\)/g, function (_, quote, url) {
+              return 'url(' + quote + fix(url) + quote + ')'
+            })
+          }
+          return new Orig(family, source, descriptors)
+        }
+        Patched.prototype = Orig.prototype
+        window.FontFace = Patched
+      }
+    })()
+  </script>
+  <script src="game.js?v=72"></script>
 </body>
 </html>
