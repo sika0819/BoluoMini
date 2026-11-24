@@ -2,12 +2,14 @@ import type { DownloadSnapshot } from '../game/download'
 import { drawEqualizer } from './equalizer'
 import {
   drawHudSvg,
+  fogSvg,
   hudSvgRev,
-  presetSvg,
   profileSvg,
+  rainSvg,
   timeSvgFor,
   warmHudSvg,
-  weatherOffSvg,
+  weatherSvg,
+  windSvg,
 } from './hudSvg'
 import { Menus } from './menus'
 
@@ -36,6 +38,11 @@ export interface UiInput {
   period: number
   panelW: number
   panelH: number
+  handDeg: number
+  /** 实时天气开关。手动改时间或天气后为关。 */
+  live: boolean
+  scoreText: string
+  phaseText: string
   idleAlpha: number
   iris: number
   joystick: { x: number; y: number; active: boolean }
@@ -67,6 +74,7 @@ export type UiAction =
   | { type: 'resume' }
   | { type: 'tier' }
   | { type: 'period' }
+  | { type: 'live'; on: boolean }
 
 interface Hit {
   x: number
@@ -113,7 +121,7 @@ export class Shell {
   private paintBuf = ''
   private hudWarm = false
 
-  constructor(agreed = false) {
+  constructor(agreed = false, private readonly profileEntry = true) {
     this.agreed = agreed
     if (!this.agreed) {
       try { this.agreed = localStorage.getItem('boluo.agree') === '1' } catch { this.agreed = false }
@@ -158,7 +166,9 @@ export class Shell {
       input.music.toFixed(2), input.fx.toFixed(2),
       input.playing ? input.trackName : '',
       input.timerRunning ? Math.ceil(input.timerLeft) : '',
-      input.period, Math.round(input.panelW), Math.round(input.panelH),
+      input.period, Math.round(input.handDeg),
+      input.scoreText, input.phaseText,
+      Math.round(input.panelW), Math.round(input.panelH),
       this.hudShown.toFixed(2), input.iris.toFixed(2),
       this.joy ? 'j' : '', this.toastText, this.caption, this.agreed ? 1 : 0,
       breathStep, this.menus.paintKey(), artRev, hudSvgRev(),
@@ -182,6 +192,7 @@ export class Shell {
     ctx.globalAlpha = this.hudShown
     this.hud(ctx, input)
     ctx.restore()
+    this.scoreHud(ctx, input)
     if (toastA > 0) this.banner(ctx, this.toastText, toastA)
     if (captionA > 0) this.banner(ctx, this.caption, captionA)
     if (this.hudShown < 0.2) this.breath(ctx, input.now)
@@ -312,6 +323,7 @@ export class Shell {
     const right = this.pw - 102 - input.capsulePad
     const names = ['清晨', '正午', '黄昏', '夜晚']
     const period = ((input.period % 4) + 4) % 4
+    const hand = Number.isFinite(input.handDeg) ? input.handDeg : period * 90
     const onTime = (ui: Shell) => {
       const next = (period + 1) % 4
       ui.toastText = names[next]
@@ -321,18 +333,19 @@ export class Shell {
     }
     if (art('/ui/time/color-swatch.png') && art('/ui/time/hand.png')) {
       this.plate(ctx, left, top, size)
-      this.timeHand(ctx, left, top, size, period * 90)
+      this.timeHand(ctx, left, top, size, hand)
       this.hit(left - size / 2, top - size / 2, size, size, 'time', onTime)
     } else {
-      this.glyph(ctx, left, top, size, 'time-' + period, timeSvgFor(period * 90), 'time', onTime)
+      this.glyph(ctx, left, top, size, 'time-' + Math.round(hand), timeSvgFor(hand), 'time', onTime)
     }
     const weather = weatherArt(input.weather, input.weatherLevel)
     const icon = art(weather)
+    const glyph = weatherGlyph(input.weather, input.weatherLevel)
     if (icon) {
       this.plate(ctx, left, top + gap, size)
       ctx.drawImage(icon, left - size / 2, top + gap - size / 2, size, size)
     } else {
-      drawHudSvg(ctx, 'weather-wait', weatherOffSvg, left - size / 2, top + gap - size / 2, size, size)
+      drawHudSvg(ctx, glyph.key, glyph.svg, left - size / 2, top + gap - size / 2, size, size)
     }
     this.hit(left - size / 2, top + gap - size / 2, size, size, 'weather', (ui) => {
       ui.menus.open('weather')
@@ -340,17 +353,33 @@ export class Shell {
     })
     this.musicIcon(ctx, left, top + gap * 2, size, input.playing, input.now)
     this.volumeIcon(ctx, left, top + gap * 3, size, input.music, input.fx)
-    this.glyph(ctx, right, top, size, 'profile', profileSvg, 'profile', (ui) => {
-      ui.menus.open('profile')
-      return null
-    })
-    this.timerIcon(ctx, right, top + gap, size, input.timerRunning, input.timerLeft)
-    if (!this.menus.hidesBottom) {
-      this.glyph(ctx, 102, this.ph - 180, 120, 'preset', presetSvg, 'preset', (ui) => {
-        ui.menus.open('preset')
+    if (this.profileEntry) {
+      this.glyph(ctx, right, top, size, 'profile', profileSvg, 'profile', (ui) => {
+        ui.menus.open('profile')
         return null
       })
     }
+    this.timerIcon(ctx, right, top + gap, size, input.timerRunning, input.timerLeft)
+  }
+
+  private scoreHud(ctx: CanvasRenderingContext2D, input: UiInput): void {
+    if (!input.scoreText && !input.phaseText) return
+    const x = this.pw * 0.5
+    ctx.save()
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.lineJoin = 'round'
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)'
+    ctx.fillStyle = '#fff'
+    ctx.lineWidth = 14
+    ctx.font = '700 84px "PingFang SC","PingFangSC-Semibold","Hiragino Sans GB",sans-serif'
+    ctx.strokeText(input.scoreText, x, 300)
+    ctx.fillText(input.scoreText, x, 300)
+    ctx.lineWidth = 10
+    ctx.font = '600 46px "PingFang SC","PingFangSC-Semibold","Hiragino Sans GB",sans-serif'
+    ctx.strokeText(input.phaseText, x, 390)
+    ctx.fillText(input.phaseText, x, 390)
+    ctx.restore()
   }
 
   private plate(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number): void {
@@ -540,7 +569,6 @@ export class Shell {
     this.hudWarm = true
     for (const src of HUD_ART) art(src)
     warmHudSvg('profile', profileSvg)
-    warmHudSvg('preset', presetSvg)
   }
 
   private loading(ctx: CanvasRenderingContext2D, progress: number): void {
@@ -572,6 +600,13 @@ export class Shell {
       ctx.fill()
     }
   }
+}
+
+function weatherGlyph(kind: UiInput['weather'], level: number): { key: string; svg: string } {
+  if (kind === 'rain' && level > 0) return { key: 'weather-rain', svg: rainSvg }
+  if (kind === 'fog' && level > 0) return { key: 'weather-fog', svg: fogSvg }
+  if (kind === 'wind' && level > 0) return { key: 'weather-wind', svg: windSvg }
+  return { key: kind === 'clear' ? 'weather-clear' : 'weather-cloud', svg: weatherSvg }
 }
 
 function weatherArt(kind: UiInput['weather'], level: number): string {

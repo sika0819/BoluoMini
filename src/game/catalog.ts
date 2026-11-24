@@ -1,5 +1,3 @@
-import type { SceneKind } from '../scene/island'
-
 export interface BankItem {
   name: string
   label: string
@@ -20,6 +18,9 @@ export const CLIPS = {
   Wind_Light: '/audio/Wind_Light.mp3',
   Wind_Medium: '/audio/Wind_Medium.mp3',
   Wind_Heavy: '/audio/Wind_Heavy.mp3',
+  Grass_Noon: '/audio/Grass_Noon.mp3',
+  Grass_Night: '/audio/Grass_Night.mp3',
+  Grass_Fog: '/audio/Grass_Fog.mp3',
 } as const
 
 export function weatherClip(kind: 'rain' | 'wind', level: number): string {
@@ -87,6 +88,9 @@ export const BANKS: BankItem[] = [
   { name: 'Rain', label: '雨', bytes: 1451565, group: 'weather', src: CLIPS.Rain_Medium },
   { name: 'Rain_Water', label: '雨打水面', bytes: 1445229, group: 'weather', src: CLIPS.Rain_Water },
   { name: 'Wind', label: '风', bytes: 1443213, group: 'weather', src: CLIPS.Wind_Medium },
+  { name: 'Grass_Noon', label: '草地', bytes: 1426797, group: 'zone', src: CLIPS.Grass_Noon },
+  { name: 'Grass_Night', label: '夜草地', bytes: 1445229, group: 'zone', src: CLIPS.Grass_Night },
+  { name: 'Grass_Fog', label: '雾草地', bytes: 1402605, group: 'zone', src: CLIPS.Grass_Fog },
   { name: 'Preset_01', label: '清晨起床', bytes: 0, group: 'preset' },
   { name: 'Preset_02', label: '独自旅行', bytes: 0, group: 'preset' },
   { name: 'Preset_03', label: '午后放松', bytes: 0, group: 'preset' },
@@ -118,12 +122,19 @@ export const ALBUMS: AlbumDef[] = [
 
 export type WeatherKind = 'clear' | 'cloud' | 'rain' | 'fog' | 'wind'
 
+/** Day bed until night. Fog replaces it. The bank's dawn and dusk common beds are too short to loop. */
+export function grassClip(period: number, weather: WeatherKind): string {
+  if (weather === 'fog') return CLIPS.Grass_Fog
+  if (period >= 3) return CLIPS.Grass_Night
+  return CLIPS.Grass_Noon
+}
+
 export interface PresetDef {
   id: string
   label: string
   desc: string
   bank: string
-  scene: SceneKind
+  scene: string
   sun: number[]
   sunColor: number[]
   fog: number[]

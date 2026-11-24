@@ -1,115 +1,112 @@
 /**
- * CustomSRP island frame: shared heightmap + per-preset local origin (TargetPos.xz).
- * Local XZ = worldXZ - origin; Y stays world meters (sea ≈ 0).
+ * Meadow from beautiful-wonderland. Metres, Y up, pond at the origin.
+ * West (sunset) is -X, south is +Z.
  */
-import {
-  HEIGHT_MAX,
-  HEIGHT_MIN_X,
-  HEIGHT_MIN_Z,
-  HEIGHT_RES,
-  HEIGHT_SIZE_X,
-  HEIGHT_SIZE_Z,
-  HEIGHT_U16,
-  PRESET_LAYOUTS,
-  WINDOW_R,
-  type PresetLayout,
-} from './data/layout.gen'
+export const TERRAIN_SIZE = 760
+export const WALK_R = 248
+export const WATER_Y = 0
 
-export const SEA = 0
-export const SHORE = 0.35
-export const ISLAND_RADIUS = WINDOW_R
+export type SceneKind = 'meadow'
 
-export type Cover = 'sand' | 'grass' | 'rock'
-/** Ten presets = ten scenes (1:1 with catalog). */
-export type SceneKind =
-  | 'p01' | 'p02' | 'p03' | 'p04' | 'p05'
-  | 'p06' | 'p07' | 'p08' | 'p09' | 'p10'
+const POND = { x: 0, z: 0, r: 50 }
+const HILL = { x: -112, z: -74, h: 20, s: 36 }
+const FOREST = { x: 62, z: -132, r: 80 }
+const PATH: Array<[number, number]> = [[118, -92], [92, -66], [74, -40], [62, -18], [56, 2], [52, 8]]
 
-let active: PresetLayout = PRESET_LAYOUTS[0]
-
-export function setActivePreset(id: SceneKind | string): PresetLayout {
-  const found = PRESET_LAYOUTS.find((p) => p.id === id) ?? PRESET_LAYOUTS[0]
-  active = found
-  return active
+function h2(ix: number, iy: number): number {
+  let n = Math.imul(ix, 374761393) + Math.imul(iy, 668265263)
+  n = Math.imul(n ^ (n >>> 13), 1274126177)
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296
 }
 
-export function activePreset(): PresetLayout {
-  return active
+export function valueNoise2(x: number, y: number): number {
+  const ix = Math.floor(x)
+  const iy = Math.floor(y)
+  const fx = x - ix
+  const fy = y - iy
+  const ux = fx * fx * fx * (fx * (fx * 6 - 15) + 10)
+  const uy = fy * fy * fy * (fy * (fy * 6 - 15) + 10)
+  const a = h2(ix, iy)
+  const b = h2(ix + 1, iy)
+  const c = h2(ix, iy + 1)
+  const d = h2(ix + 1, iy + 1)
+  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy
 }
 
-export function originX(): number { return active.ox }
-export function originZ(): number { return active.oz }
-export function originY(): number { return active.oy }
-
-/** World XZ from local. */
-export function toWorld(lx: number, lz: number): { x: number; z: number } {
-  return { x: lx + active.ox, z: lz + active.oz }
+export function fbm2(x: number, y: number, oct = 5): number {
+  let a = 0.5
+  let s = 0
+  for (let i = 0; i < oct; i++) {
+    s += a * valueNoise2(x, y)
+    x = x * 2.03 + 17.1
+    y = y * 2.03 + 9.3
+    a *= 0.5
+  }
+  return s
 }
 
-/** Local XZ from world. */
-export function toLocal(wx: number, wz: number): { x: number; z: number } {
-  return { x: wx - active.ox, z: wz - active.oz }
+export function smoothstep(a: number, b: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)))
+  return t * t * (3 - 2 * t)
 }
 
-function sampleHeightWorld(wx: number, wz: number): number {
-  const u = (wx - HEIGHT_MIN_X) / HEIGHT_SIZE_X
-  const v = (wz - HEIGHT_MIN_Z) / HEIGHT_SIZE_Z
-  if (u < -0.02 || v < -0.02 || u > 1.02 || v > 1.02) return -1.2
-  const x = Math.max(0, Math.min(HEIGHT_RES - 1.001, u * (HEIGHT_RES - 1)))
-  const z = Math.max(0, Math.min(HEIGHT_RES - 1.001, v * (HEIGHT_RES - 1)))
-  const x0 = Math.floor(x)
-  const z0 = Math.floor(z)
-  const x1 = Math.min(HEIGHT_RES - 1, x0 + 1)
-  const z1 = Math.min(HEIGHT_RES - 1, z0 + 1)
-  const tx = x - x0
-  const tz = z - z0
-  const h = (ix: number, iz: number) => (HEIGHT_U16[iz * HEIGHT_RES + ix] / 65535) * HEIGHT_MAX
-  const h00 = h(x0, z0)
-  const h10 = h(x1, z0)
-  const h01 = h(x0, z1)
-  const h11 = h(x1, z1)
-  return (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz
+export function pondRadius(theta: number): number {
+  return POND.r
+    + 8 * Math.sin(2 * theta + 1.0)
+    + 5.5 * Math.sin(3 * theta + 0.3)
+    + 3.5 * Math.sin(5 * theta + 2.1)
 }
 
-/** Terrain height in world Y at local (lx, lz). */
-export function height(lx: number, lz: number): number {
-  return sampleHeightWorld(lx + active.ox, lz + active.oz)
+/** Signed distance to the shoreline. Negative is in the pond. */
+export function shoreDist(x: number, z: number): number {
+  const dx = x - POND.x
+  const dz = z - POND.z
+  return Math.hypot(dx, dz) - pondRadius(Math.atan2(dz, dx))
 }
 
-export function heightWorld(wx: number, wz: number): number {
-  return sampleHeightWorld(wx, wz)
+function segDist(px: number, pz: number, ax: number, az: number, bx: number, bz: number): number {
+  const vx = bx - ax
+  const vz = bz - az
+  const wx = px - ax
+  const wz = pz - az
+  const t = Math.max(0, Math.min(1, (wx * vx + wz * vz) / (vx * vx + vz * vz)))
+  return Math.hypot(px - (ax + vx * t), pz - (az + vz * t))
 }
 
-export function slope(lx: number, lz: number): number {
-  const e = 0.85
-  const hx = height(lx + e, lz) - height(lx - e, lz)
-  const hz = height(lx, lz + e) - height(lx, lz - e)
-  const ny = e * 2
-  const len = Math.hypot(hx, ny, hz) || 1
-  return 1 - ny / len
+export function pathDist(x: number, z: number): number {
+  let d = 1e9
+  for (let i = 0; i < PATH.length - 1; i++) {
+    d = Math.min(d, segDist(x, z, PATH[i][0], PATH[i][1], PATH[i + 1][0], PATH[i + 1][1]))
+  }
+  return d
 }
 
-export function cover(lx: number, lz: number): Cover {
-  const h = height(lx, lz)
-  if (h < 1.2) return 'sand'
-  if (slope(lx, lz) > 0.55 || h > 90) return 'rock'
-  return 'grass'
+export function height(x: number, z: number): number {
+  let h = 2.4
+    + (fbm2(x * 0.0075 + 3.1, z * 0.0075 + 1.7) - 0.5) * 13
+    + (fbm2(x * 0.031 + 9, z * 0.031) - 0.5) * 2.2
+  const hx = x - HILL.x
+  const hz = z - HILL.z
+  h += HILL.h * Math.exp(-(hx * hx + hz * hz) / (2 * HILL.s * HILL.s))
+  h += 13 * smoothstep(-190, -330, x) * (0.55 + 0.45 * valueNoise2(z * 0.012 + 4, 2.2))
+  const fx = x - FOREST.x
+  const fz = z - FOREST.z
+  h += 4 * Math.exp(-(fx * fx + fz * fz) / (2 * 70 * 70))
+  const pd = pathDist(x, z)
+  h = h + (2.1 - h) * 0.55 * smoothstep(9, 1.5, pd)
+  const sd = shoreDist(x, z)
+  const bed = Math.max(-1.7, -0.22 + sd * 0.13)
+  h = bed + (h - bed) * smoothstep(-2, 13, sd)
+  return h
 }
 
-/** Spawn is always local origin (CustomSRP TargetPos). */
-export const SCENE_SPAWN: Record<SceneKind, { x: number; z: number; yaw: number }> =
-  Object.fromEntries(
-    PRESET_LAYOUTS.map((p) => [p.id, { x: 0, z: 0, yaw: p.yaw }]),
-  ) as Record<SceneKind, { x: number; z: number; yaw: number }>
-
-export const SPAWN = SCENE_SPAWN.p01
-
-/** Landmark helpers: search current preset window items via world→local. */
-export function landmarkLocal(
-  kind: string,
-  fallback: { x: number; z: number } = { x: 0, z: 0 },
-): { x: number; z: number } {
-  // filled by world when layout items are known; default near spawn
-  void kind
-  return fallback
+export function forestAmount(x: number, z: number): number {
+  const d = Math.hypot(x - FOREST.x, z - FOREST.z)
+  return smoothstep(FOREST.r + 12, FOREST.r - 14, d + (valueNoise2(x * 0.04, z * 0.04) - 0.5) * 26)
 }
+
+export const HILL_POS = HILL
+export const FOREST_POS = FOREST
+
+/** South-east meadow, looking back toward the pond. */
+export const SCENE_SPAWN = { x: 86, z: 58, yaw: Math.atan2(-86, -58) }

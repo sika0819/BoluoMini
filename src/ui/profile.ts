@@ -72,6 +72,11 @@ interface Box {
   h: number
   multiline: boolean
   secret: boolean
+  font: number
+  weight: number
+  pad: number
+  placeholder: string
+  numeric: boolean
 }
 
 interface Frame {
@@ -190,6 +195,8 @@ export class ProfilePane {
   private loginW = W
   private loginH = H
   private loginX = 0
+  private loginPadX = 0
+  private loginPadY = 0
   private codeShown = false
   private agreedLogin = false
   private pendingLogin: (() => void) | null = null
@@ -554,77 +561,68 @@ export class ProfilePane {
   }
 
   private paintLogin(ctx: CanvasRenderingContext2D): void {
+    const outerW = this.loginW
+    const outerH = this.loginH
+    const cardW = Math.min(dp(340), Math.max(dp(260), outerW - dp(24)))
+    const home = this.view === 'switch'
+    const cardH = Math.min(home ? dp(400) : dp(560), Math.max(dp(360), outerH - dp(32)))
+    const x = Math.round((outerW - cardW) / 2)
+    const y = Math.round((outerH - cardH) / 2)
+    round(ctx, x, y, cardW, cardH, dp(16))
+    ctx.fillStyle = '#fff'
+    ctx.fill()
+    this.hit(x, y, cardW, cardH, 'lcard', () => null)
+    this.loginW = cardW
+    this.loginH = cardH
+    this.loginPadX = x
+    this.loginPadY = y
+    ctx.save()
+    round(ctx, x, y, cardW, cardH, dp(16))
+    ctx.clip()
+    ctx.translate(x, y)
     if (this.view === 'switch') this.pageLoginHome(ctx)
     else if (this.view === 'login-phone') this.pageLoginPhone(ctx)
     else if (this.view === 'login-password') this.pageLoginPassword(ctx)
     else if (this.view === 'login-wechat') this.pageLoginWechat(ctx)
     else this.pageLoginBind(ctx)
+    ctx.restore()
+    this.loginPadX = 0
+    this.loginPadY = 0
+    this.loginW = outerW
+    this.loginH = outerH
   }
 
   private pageLoginHome(ctx: CanvasRenderingContext2D): void {
     const W = this.loginW
-    const H = this.loginH
-    this.loginBack(ctx, true)
-    const logoW = dp(133)
-    const logoH = logoW * (192 / 544)
-    const buttonH = dp(56)
-    const actionsH = buttonH * 2 + dp(12) * 2 + dp(8) * 2 + dp(20)
-    const agreementH = dp(28)
-    const topIdeal = dp(118)
-    const gapIdeal = dp(142)
-    const bottomIdeal = dp(40)
-    const midMin = dp(16)
-    let logoDrawW = logoW
-    let logoDrawH = logoH
-    let contentH = logoDrawH + actionsH + agreementH
-    let free = H - contentH
-    const ideal = topIdeal + midMin + gapIdeal + bottomIdeal
-    if (free < ideal * 0.4) {
-      logoDrawW = logoW * 0.78
-      logoDrawH = logoDrawW * (192 / 544)
-      contentH = logoDrawH + actionsH + agreementH
-      free = H - contentH
-    }
-    let top = topIdeal
-    let mid = midMin
-    let gap = gapIdeal
-    if (free >= ideal) mid = free - top - gap - bottomIdeal
-    else {
-      const scale = ideal > 0 ? Math.max(0, Math.min(1, free / ideal)) : 0
-      top = topIdeal * scale
-      mid = midMin * scale
-      gap = gapIdeal * scale
-    }
-    const logo = imageOf('/ui/login/logo.png', () => { this.imageRev += 1 })
-    if (logo) ctx.drawImage(logo, (W - logoDrawW) / 2, top, logoDrawW, logoDrawH)
-    let y = top + logoDrawH + mid
-    const x = dp(60)
-    const w = W - dp(120)
-    const phoneMark = this.lastMethod === 'verify' || this.lastMethod === 'password'
-    this.iconButton(ctx, x, y, w, '手机号登录', 'fill', 'phone', 'login-phone', () => {
-      this.push('login-phone')
-      return null
-    })
-    if (phoneMark) this.lastBubble(ctx, W / 2, y)
-    y += buttonH + dp(12)
-    this.iconButton(ctx, x, y, w, '微信登录', 'stroke', 'wechat', 'login-wechat', () => {
-      this.ensureAgree(() => this.push('login-wechat'))
-      return null
-    })
-    if (this.lastMethod === 'wechat') this.lastBubble(ctx, W / 2, y)
-    y += buttonH + dp(12)
-    ctx.fillStyle = LINK
-    ctx.font = font(dp(13))
+    ctx.fillStyle = INK
+    ctx.font = fontBold(dp(22))
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText('其他方式登录 >', W / 2, y + dp(8) + dp(10))
-    this.hit(W / 2 - dp(90), y, dp(180), dp(36), 'login-other', () => {
-      this.overlay = 'other'
-      this.blur()
+    ctx.fillText('登录', W / 2, dp(40))
+    const x = dp(28)
+    const w = W - dp(56)
+    const buttonH = dp(56)
+    let y = dp(72)
+    const phoneMark = this.lastMethod === 'verify' || this.lastMethod === 'password'
+    this.loginButton(ctx, x, y, w, '手机号登录', true, 'login-phone', () => {
+      this.push('login-phone')
       return null
-    })
-    y += dp(36) + gap
-    this.agreementRow(ctx, y + agreementH / 2, true)
+    }, true)
+    if (phoneMark) this.lastBubble(ctx, W / 2, y)
+    y += buttonH + dp(12)
+    this.loginButton(ctx, x, y, w, '微信登录', true, 'login-wechat', () => {
+      this.ensureAgree(() => this.push('login-wechat'))
+      return null
+    }, false)
+    if (this.lastMethod === 'wechat') this.lastBubble(ctx, W / 2, y)
+    y += buttonH + dp(12)
+    this.loginButton(ctx, x, y, w, '游客进入', true, 'login-guest-go', () => {
+      this.ensureAgree(() => this.submitGuest())
+      return null
+    }, false)
+    if (this.lastMethod === 'guest') this.lastBubble(ctx, W / 2, y)
+    y += buttonH + dp(36)
+    this.agreementRow(ctx, y, true)
   }
 
   private pageLoginPhone(ctx: CanvasRenderingContext2D): void {
@@ -752,10 +750,14 @@ export class ProfilePane {
     }
   }
 
-  private loginBack(ctx: CanvasRenderingContext2D, closeRoot: boolean): void {
-    const y = dp(47)
-    blit(ctx, '/ui/mine/back.svg', dp(16), y, dp(36), dp(36))
-    this.hit(dp(4), y - dp(4), dp(72), dp(44), 'login-back', () => {
+  private loginBack(ctx: CanvasRenderingContext2D, closeRoot: boolean): number {
+    const y = dp(16)
+    ctx.fillStyle = LINK
+    ctx.font = fontRegular(dp(15))
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'middle'
+    ctx.fillText('返回', dp(20), y + dp(12))
+    this.hit(dp(8), y, dp(80), dp(36), 'login-back', () => {
       if (closeRoot && this.stack.length <= 1) {
         this.host?.close()
         return null
@@ -763,12 +765,12 @@ export class ProfilePane {
       this.back()
       return null
     })
+    return y + dp(36)
   }
 
   private loginHeading(ctx: CanvasRenderingContext2D, title: string, sub: string): number {
     const W = this.loginW
-    this.loginBack(ctx, false)
-    let y = dp(47) + dp(44) + dp(4)
+    let y = this.loginBack(ctx, false) + dp(8)
     ctx.fillStyle = INK
     ctx.font = fontBold(dp(22))
     ctx.textAlign = 'center'
@@ -887,7 +889,23 @@ export class ProfilePane {
       this.focus(id, numeric, false)
       return null
     })
-    this.boxes.push({ id, x, y, w, h, multiline: false, secret })
+    // Coordinates are inside the centered card. The DOM field is positioned in
+    // panel space, so the card offset has to be baked in or the caret lands
+    // above the line and the tap never hits the real input.
+    this.boxes.push({
+      id,
+      x: x + this.loginPadX,
+      y: y + this.loginPadY,
+      w,
+      h,
+      multiline: false,
+      secret,
+      font: dp(18),
+      weight: 400,
+      pad: 0,
+      placeholder,
+      numeric,
+    })
   }
 
   private agreementRow(ctx: CanvasRenderingContext2D, cy: number, center: boolean): void {
@@ -1000,12 +1018,24 @@ export class ProfilePane {
     enabled: boolean,
     id: string,
     on: () => UiAction | null,
+    filled = true,
   ): void {
     const h = dp(56)
     round(ctx, x, y, w, h, h / 2)
-    ctx.fillStyle = enabled ? INK : '#F6F6F8'
-    ctx.fill()
-    ctx.fillStyle = enabled ? '#fff' : GRAY5
+    if (!enabled) {
+      ctx.fillStyle = '#F6F6F8'
+      ctx.fill()
+    } else if (filled) {
+      ctx.fillStyle = INK
+      ctx.fill()
+    } else {
+      ctx.fillStyle = '#fff'
+      ctx.fill()
+      ctx.strokeStyle = '#E6E6F0'
+      ctx.lineWidth = Math.max(1, dp(1))
+      ctx.stroke()
+    }
+    ctx.fillStyle = !enabled ? GRAY5 : filled ? '#fff' : INK
     ctx.font = font(dp(16))
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
@@ -1042,38 +1072,43 @@ export class ProfilePane {
     capsuleMark: boolean,
   ): void {
     const W = this.loginW
-    const size = dp(40)
-    const gap = dp(16)
+    const items: Array<{ label: string; id: string; mark: boolean; on: () => UiAction | null }> = [
+      {
+        label: '微信登录',
+        id: 'login-opt-wechat',
+        mark: this.lastMethod === 'wechat',
+        on: () => {
+          this.ensureAgree(() => this.push('login-wechat'))
+          return null
+        },
+      },
+      {
+        label: '游客进入',
+        id: 'login-opt-guest',
+        mark: this.lastMethod === 'guest',
+        on: () => {
+          this.ensureAgree(() => this.submitGuest())
+          return null
+        },
+      },
+      { label: capsule, id: 'login-opt-text', mark: capsuleMark, on: onCapsule },
+    ]
     ctx.font = fontRegular(dp(14))
-    const textW = ctx.measureText(capsule).width + dp(48)
-    const total = size + gap + size + gap + textW
+    const gap = dp(18)
+    const widths = items.map((item) => ctx.measureText(item.label).width)
+    const total = widths.reduce((sum, w) => sum + w, 0) + gap * (items.length - 1)
     let x = (W - total) / 2
-    const wechatX = x
-    this.roundChoice(ctx, x, y, size, 'wechat', 'login-opt-wechat', () => {
-      this.ensureAgree(() => this.push('login-wechat'))
-      return null
+    const h = dp(32)
+    items.forEach((item, i) => {
+      const w = widths[i]
+      ctx.fillStyle = INK
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(item.label, x, y + h / 2)
+      this.hit(x - dp(4), y, w + dp(8), h, item.id, item.on)
+      if (item.mark) this.lastBubble(ctx, x + w / 2, y)
+      x += w + gap
     })
-    x += size + gap
-    const guestX = x
-    this.roundChoice(ctx, x, y, size, 'guest', 'login-opt-guest', () => {
-      this.ensureAgree(() => this.submitGuest())
-      return null
-    })
-    x += size + gap
-    const capsuleX = x
-    round(ctx, x, y, textW, size, size / 2)
-    ctx.strokeStyle = '#E6E6F0'
-    ctx.lineWidth = Math.max(1, dp(1))
-    ctx.stroke()
-    ctx.fillStyle = INK
-    ctx.font = fontRegular(dp(14))
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(capsule, x + textW / 2, y + size / 2)
-    this.hit(x, y, textW, size, 'login-opt-text', onCapsule)
-    if (this.lastMethod === 'wechat') this.lastBubble(ctx, wechatX + size / 2, y)
-    if (this.lastMethod === 'guest') this.lastBubble(ctx, guestX + size / 2, y)
-    if (capsuleMark) this.lastBubble(ctx, capsuleX + textW / 2, y)
   }
 
   private roundChoice(
@@ -2222,9 +2257,9 @@ export class ProfilePane {
   }
 
   private hit(x: number, y: number, w: number, h: number, id: string, on: () => UiAction | null): void {
-    const yy = this.scrolling ? y - this.scroll : y
+    const yy = (this.scrolling ? y - this.scroll : y) + this.loginPadY
     if (this.scrolling && (yy + h < this.clipY || yy > this.clipY + this.clipH)) return
-    this.host?.hit(x, yy, w, h, id, on)
+    this.host?.hit(x + this.loginPadX, yy, w, h, id, on)
   }
 
   private card(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {
@@ -2287,7 +2322,20 @@ export class ProfilePane {
       return null
     })
     const yy = this.scrolling ? y - this.scroll : y
-    this.boxes.push({ id, x, y: yy, w, h, multiline, secret: false })
+    this.boxes.push({
+      id,
+      x,
+      y: yy,
+      w,
+      h,
+      multiline,
+      secret,
+      font: 42,
+      weight: 500,
+      pad: multiline ? 28 : 36,
+      placeholder,
+      numeric,
+    })
   }
 
   private secretBox(ctx: CanvasRenderingContext2D, x: number, y: number, id: 'pass' | 'pass2', placeholder: string): void {
@@ -2351,26 +2399,17 @@ export class ProfilePane {
 
   private focus(id: FieldId, numeric = false, multiline = false): void {
     this.field = id
-    if (typeof document === 'undefined') {
+    if (typeof document === 'undefined' || !document.getElementById('ui')) {
       this.focusNative(id, numeric, multiline)
       return
     }
-    const el = ensureField(multiline)
-    el.value = this.values[id]
-    el.maxLength = maxOf(id)
-    el.placeholder = ''
-    if (el instanceof HTMLInputElement) {
-      el.type = this.secret[id] === false || !(id === 'pass' || id === 'pass2') ? 'text' : 'password'
-      el.inputMode = numeric ? 'numeric' : 'text'
-    }
-    el.oninput = () => {
-      this.applyField(id, el.value, numeric)
-      if (el.value !== this.values[id]) el.value = this.values[id]
-    }
+    const el = this.ensureField(id, multiline)
+    this.bindField(el, id, numeric)
     const box = this.boxes.find((item) => item.id === id)
-    if (box) this.pin(el, box.x, box.y, box.w, box.h)
+    if (box) this.dress(el, box)
     el.style.display = 'block'
-    el.focus()
+    el.classList.add('on')
+    focusField(el)
   }
 
   private focusNative(id: FieldId, numeric: boolean, multiline: boolean): void {
@@ -2404,11 +2443,10 @@ export class ProfilePane {
   private blur(): void {
     this.field = ''
     if (typeof document !== 'undefined') {
-      const el = document.getElementById('boluo-field') as HTMLInputElement | HTMLTextAreaElement | null
-      if (el) {
-        el.blur()
-        el.style.display = 'none'
-      }
+      document.querySelectorAll<HTMLElement>('.boluo-field').forEach((el) => {
+        el.classList.remove('on')
+        if (document.activeElement === el) el.blur()
+      })
     }
     const api = (globalThis as unknown as { wx?: KeyboardApi }).wx
     api?.hideKeyboard?.({})
@@ -2419,21 +2457,34 @@ export class ProfilePane {
   }
 
   private placeField(host: Host): void {
-    const el = document.getElementById('boluo-field') as HTMLInputElement | HTMLTextAreaElement | null
-    if (!el) return
-    const box = this.boxes.find((item) => item.id === this.field)
-    const hide = !this.field || !box || host.modal || (this.overlay !== '' && this.overlay !== 'nick')
-    if (hide || !box) {
-      el.style.display = 'none'
-      return
+    const hideAll = host.modal || (this.overlay !== '' && this.overlay !== 'nick')
+    const shown = new Map<FieldId, Box>()
+    if (!hideAll) {
+      for (const box of this.boxes) {
+        if (this.overlay === 'nick' && box.id !== 'nick') continue
+        shown.set(box.id, box)
+      }
     }
-    this.pin(el, box.x, box.y, box.w, box.h)
-    el.style.display = 'block'
-    el.style.fontSize = `${42 * this.scaleY()}px`
-    if (el instanceof HTMLInputElement) {
-      const hidden = (this.field === 'pass' || this.field === 'pass2') && this.secret[this.field] !== false
-      el.type = hidden ? 'password' : 'text'
+    const ids: FieldId[] = ['nick', 'feedback', 'contact', 'phone', 'code', 'pass', 'pass2']
+    for (const id of ids) {
+      const box = shown.get(id)
+      const el = document.getElementById('boluo-field-' + id) as HTMLInputElement | HTMLTextAreaElement | null
+      if (!box) {
+        if (el) {
+          el.classList.remove('on')
+          if (document.activeElement === el) el.blur()
+          el.style.display = 'none'
+        }
+        continue
+      }
+      const field = el ?? this.ensureField(id, box.multiline)
+      this.bindField(field, id, box.numeric)
+      this.dress(field, box)
+      field.style.display = 'block'
+      field.classList.toggle('on', document.activeElement === field)
+      if (document.activeElement !== field && field.value !== this.values[id]) field.value = this.values[id]
     }
+    document.getElementById('boluo-field')?.remove()
   }
 
   private pin(el: HTMLElement, x: number, y: number, w: number, h: number): void {
@@ -2448,10 +2499,82 @@ export class ProfilePane {
     el.style.height = `${h * sy}px`
   }
 
-  private scaleY(): number {
+  private dress(el: HTMLElement, box: Box): void {
     const ui = document.getElementById('ui')
-    if (!ui) return 1
-    return ui.getBoundingClientRect().height / Math.max(1, this.frame.ph)
+    if (!ui) return
+    const rect = ui.getBoundingClientRect()
+    const sx = rect.width / Math.max(1, this.frame.pw)
+    const sy = rect.height / Math.max(1, this.frame.ph)
+    this.pin(el, box.x, box.y, box.w, box.h)
+    // iOS zooms and throws the caret when a focused field is under 16px,
+    // and with user-scalable=no that zoom is what swallows the keyboard.
+    const cssFont = Math.max(16, box.font * sy)
+    el.style.fontSize = `${cssFont}px`
+    el.style.fontWeight = String(box.weight)
+    if (box.multiline) {
+      el.style.padding = `${28 * sy}px ${28 * sx}px`
+      el.style.lineHeight = `${58 * sy}px`
+    } else {
+      el.style.padding = `0 0 0 ${box.pad * sx}px`
+      el.style.lineHeight = `${box.h * sy}px`
+    }
+    if (!(el instanceof HTMLInputElement)) return
+    const hidden = (box.id === 'pass' || box.id === 'pass2') && this.secret[box.id] !== false
+    const next = hidden ? 'password' : (box.numeric ? 'tel' : 'text')
+    if (document.activeElement !== el && el.type !== next) el.type = next
+  }
+
+  private bindField(el: HTMLInputElement | HTMLTextAreaElement, id: FieldId, numeric: boolean): void {
+    el.maxLength = maxOf(id)
+    el.placeholder = ''
+    const box = this.boxes.find((item) => item.id === id)
+    if (box) el.placeholder = box.placeholder
+    if (el instanceof HTMLInputElement) el.inputMode = numeric ? 'numeric' : 'text'
+    el.oninput = () => {
+      this.applyField(id, el.value, numeric)
+      if (el.value !== this.values[id]) {
+        const pos = el.selectionStart
+        el.value = this.values[id]
+        if (pos != null) {
+          const n = Math.min(pos, el.value.length)
+          try { el.setSelectionRange(n, n) } catch { /* password fields reject a range */ }
+        }
+      }
+    }
+  }
+
+  private ensureField(id: FieldId, multiline: boolean): HTMLInputElement | HTMLTextAreaElement {
+    ensureFieldCss()
+    const domId = 'boluo-field-' + id
+    const current = document.getElementById(domId)
+    if (current && ((multiline && current instanceof HTMLTextAreaElement) || (!multiline && current instanceof HTMLInputElement))) {
+      return current as HTMLInputElement | HTMLTextAreaElement
+    }
+    current?.remove()
+    const el = document.createElement(multiline ? 'textarea' : 'input')
+    el.id = domId
+    el.className = 'boluo-field'
+    el.setAttribute('autocomplete', 'off')
+    el.setAttribute('autocorrect', 'off')
+    el.setAttribute('autocapitalize', 'off')
+    el.setAttribute('spellcheck', 'false')
+    el.setAttribute('enterkeyhint', 'done')
+    if (el instanceof HTMLTextAreaElement) el.style.resize = 'none'
+    el.addEventListener('touchstart', () => {
+      if (document.activeElement !== el) focusField(el)
+      else holdPage()
+    }, { passive: true })
+    el.addEventListener('focus', () => {
+      this.field = id
+      el.classList.add('on')
+      holdPage()
+    })
+    el.addEventListener('blur', () => {
+      el.classList.remove('on')
+      if (this.field === id) this.field = ''
+    })
+    document.body.appendChild(el)
+    return el
   }
 }
 
@@ -2470,28 +2593,34 @@ function maxOf(id: FieldId): number {
   return 20
 }
 
-function ensureField(multiline: boolean): HTMLInputElement | HTMLTextAreaElement {
-  const current = document.getElementById('boluo-field')
-  if (current && ((multiline && current instanceof HTMLTextAreaElement) || (!multiline && current instanceof HTMLInputElement))) {
-    return current as HTMLInputElement | HTMLTextAreaElement
-  }
-  current?.remove()
-  const el = document.createElement(multiline ? 'textarea' : 'input')
-  el.id = 'boluo-field'
-  el.setAttribute('autocomplete', 'off')
-  el.style.position = 'fixed'
-  el.style.zIndex = '8'
-  el.style.margin = '0'
-  el.style.padding = '0 12px'
-  el.style.border = 'none'
-  el.style.outline = 'none'
-  el.style.background = 'transparent'
-  el.style.color = INK
-  el.style.fontFamily = '"PingFang SC","Hiragino Sans GB",sans-serif'
-  el.style.boxSizing = 'border-box'
-  if (el instanceof HTMLTextAreaElement) el.style.resize = 'none'
-  document.body.appendChild(el)
-  return el
+function focusField(el: HTMLElement): void {
+  const input = el as HTMLInputElement
+  try { input.focus({ preventScroll: true }) } catch { input.focus() }
+  holdPage()
+}
+
+function holdPage(): void {
+  if (window.scrollX || window.scrollY) window.scrollTo(0, 0)
+}
+
+function ensureFieldCss(): void {
+  if (document.getElementById('boluo-field-css')) return
+  const style = document.createElement('style')
+  style.id = 'boluo-field-css'
+  style.textContent = [
+    '.boluo-field{position:fixed;z-index:8;margin:0;border:none;outline:none;background:transparent;',
+    'box-sizing:border-box;border-radius:0;-webkit-appearance:none;appearance:none;',
+    'color:transparent;-webkit-text-fill-color:transparent;caret-color:transparent;',
+    'font-family:"PingFang SC","Hiragino Sans GB",sans-serif;touch-action:manipulation;text-align:left}',
+    '.boluo-field.on{color:#19191A;-webkit-text-fill-color:#19191A;caret-color:#19191A}',
+    '.boluo-field::placeholder{color:transparent}',
+    '.boluo-field.on::placeholder{color:#C4C4C7}',
+  ].join('')
+  document.head.appendChild(style)
+  window.addEventListener('scroll', () => {
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active.classList.contains('boluo-field')) holdPage()
+  }, { passive: true })
 }
 
 function shrinkImage(src: string, done: (url: string) => void): void {

@@ -129,7 +129,7 @@ export class Menus {
     return [
       this.panel ?? '', this.dialog ?? '', this.forceAgreement ? 1 : 0, banks.dialog, spriteRev,
       this.profile.key(), Math.round(this.listY), this.album, Math.round(this.albumX),
-      Math.round(this.presetX), this.knobLevel, this.mode, this.weatherTab,
+      Math.round(this.presetX), this.knobLevel, this.mode, this.weatherTab, this.input?.live ? 1 : 0,
       this.timerFill.toFixed(2), this.timerPhase, this.timerLive ? 1 : 0,
       Math.round(this.knobX.v), Math.round(this.knobY.v), this.knobS.v.toFixed(2),
       this.revealText, this.rollText, progress,
@@ -181,10 +181,11 @@ export class Menus {
   }
 
   open(panel: Panel): void {
+    if (panel === 'preset') return
     if (panel === 'profile') {
       const user = currentUser()
       if (!user || user.guest) {
-        this.openDialog('guest')
+        this.showLogin()
         return
       }
     }
@@ -678,9 +679,8 @@ export class Menus {
       const start = this.hits.length
       ctx.save()
       ctx.translate(0, dy)
-      ctx.fillStyle = '#fff'
+      ctx.fillStyle = 'rgba(0,0,0,0.45)'
       ctx.fillRect(0, 0, pw, ph)
-      this.hit(0, 0, pw, ph, 'pcard', () => null)
       this.profile.draw(ctx, {
         now: this.now,
         modal: this.dialog != null,
@@ -718,11 +718,13 @@ export class Menus {
     }
   }
 
-  private drawWeather(ctx: CanvasRenderingContext2D, _input: UiInput): void {
+  private drawWeather(ctx: CanvasRenderingContext2D, input: UiInput): void {
     const x = 45
     const y = 1581
     sheet(ctx, x, y, 1035, 735, 147)
     this.hit(x, y, 1035, 735, 'card', () => null)
+    if (input.live && this.drag !== 'knob' && !this.knobAnim) this.mirrorLiveWeather(input)
+    this.liveSwitch(ctx, 912, 1679, input.live)
     const tabs = ['风', '雨', '雾']
     const origins = [364.5, 520.5, 676.5]
     tabs.forEach((label, i) => {
@@ -743,7 +745,7 @@ export class Menus {
         const live = this.input
         this.knobLevel = live && live.weather === kind ? Math.max(0, Math.min(3, live.weatherLevel)) : 0
         this.knobMargin = LEVEL_ML[this.knobLevel]
-        return null
+        return { type: 'weather', kind, level: this.knobLevel }
       })
     })
     const tabX = origins[this.weatherTab] + 42 - 21
@@ -783,6 +785,49 @@ export class Menus {
       ctx.fillText(LEVEL_NAME[this.knobLevel], kx + 72, 2058 + 72)
     }
     this.hit(kx, 2058, 144, 144, 'knob', () => null)
+  }
+
+  private mirrorLiveWeather(input: UiInput): void {
+    const kind = input.weather
+    if (kind === 'rain' || kind === 'fog' || kind === 'wind') {
+      this.weatherTab = WEATHER_KIND.indexOf(kind)
+      this.knobLevel = Math.max(0, Math.min(3, input.weatherLevel))
+    } else {
+      this.knobLevel = 0
+    }
+    this.knobMargin = LEVEL_ML[this.knobLevel]
+  }
+
+  private liveSwitch(ctx: CanvasRenderingContext2D, x: number, y: number, on: boolean): void {
+    const w = 120
+    const h = 72
+    ctx.fillStyle = INK
+    ctx.font = font(36)
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'middle'
+    ctx.fillText('实时', x - 18, y + h / 2)
+    round(ctx, x, y, w, h, h / 2)
+    ctx.fillStyle = on ? GREEN : '#E6E7EB'
+    ctx.fill()
+    const knob = 60
+    const pad = 6
+    const kx = on ? x + w - pad - knob : x + pad
+    const ky = y + (h - knob) / 2
+    ctx.save()
+    ctx.shadowColor = 'rgba(0,0,0,0.12)'
+    ctx.shadowBlur = 16
+    ctx.fillStyle = '#fff'
+    ctx.beginPath()
+    ctx.arc(kx + knob / 2, ky + knob / 2, knob / 2, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+    this.hit(x - 96, y, w + 96, h, 'live', () => {
+      if (this.weatherBusy()) {
+        this.toast('天气正在改变,稍后再操作')
+        return null
+      }
+      return { type: 'live', on: !on }
+    })
   }
 
   private levelFromTrack(x: number): number {
@@ -833,8 +878,7 @@ export class Menus {
     ctx.font = font(42)
     ctx.textAlign = 'left'
     ctx.textBaseline = 'middle'
-    ctx.fillText(`全部歌曲${tracks.length}首`, 131, 1146 + 29)
-    this.drawMode(ctx)
+    ctx.fillText('选择关卡', 131, 1146 + 29)
     const listTop = 1260
     const listH = 996
     this.hit(x, listTop, 1035, listH, 'mlist', () => null)
@@ -882,7 +926,7 @@ export class Menus {
       } else if (loading) ring(ctx, iconX + 30, iconY + 30, 22, input.banks.progress[track.name] ?? 0)
       else if (!ready) blit(ctx, failed ? '/ui/ref/MusicError.png' : '/ui/ref/MusicNotDownload.png', iconX, iconY, 60, 60)
       this.hit(x, row, 1035, ROW_H, 'tr' + track.name, () => {
-        if (loading || playing) return null
+        if (loading) return null
         if (ready) {
           this.heard.add(track.name)
           return { type: 'play', name: track.name }
@@ -892,18 +936,6 @@ export class Menus {
     })
     ctx.restore()
     this.drawBar(ctx, 1035 - 28, listTop, listH, this.listY, Math.max(0, tracks.length * ROW_H - listH))
-  }
-
-  private drawMode(ctx: CanvasRenderingContext2D): void {
-    const x = 818
-    const y = 1133
-    const file = this.mode === 1 ? 'yy_danqu' : this.mode === 2 ? 'yy_list' : 'yy_suiji'
-    blit(ctx, `/ui/ref/${file}.png`, x, y, 180, 84)
-    this.hit(x, y, 180, 84, 'mode', () => {
-      this.mode = this.mode === 1 ? 2 : this.mode === 2 ? 3 : 1
-      this.toast(this.mode === 1 ? '单曲循环' : this.mode === 2 ? '列表循环' : '随机播放')
-      return null
-    })
   }
 
   private drawVolume(ctx: CanvasRenderingContext2D, input: UiInput): void {

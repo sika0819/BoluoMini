@@ -15,14 +15,35 @@ export function createBrowserHost(): Host {
     ?? document.querySelector('canvas')
   if (!canvas) throw new Error('missing canvas')
   const ui = document.getElementById('ui') as HTMLCanvasElement | null
+  // The soft keyboard shrinks innerHeight. Refitting to that short viewport
+  // scales the whole login card down. Keep the size from before the keyboard.
+  let stableW = 0
+  let stableH = 0
+  const fieldFocused = (): boolean => {
+    const active = document.activeElement
+    return active instanceof HTMLElement && active.classList.contains('boluo-field')
+  }
+  const screenSize = (): { width: number; height: number } => {
+    const width = window.innerWidth
+    const height = Math.max(window.innerHeight, Math.round(window.visualViewport?.height ?? 0))
+    const rotated = stableW > 0 && Math.abs(width - stableW) > 80
+    // A focused field ignores the shorter viewport the keyboard creates.
+    // A real rotation still updates both sides.
+    if (stableH === 0 || !fieldFocused() || rotated || height > stableH) {
+      stableW = width
+      stableH = height
+    }
+    return { width: stableW, height: stableH }
+  }
   const fit = () => {
-    const scale = glScale(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1)
-    canvas.width = Math.max(2, Math.floor(window.innerWidth * scale))
-    canvas.height = Math.max(2, Math.floor(window.innerHeight * scale))
-    canvas.style.width = '100vw'
-    canvas.style.height = '100vh'
+    const { width, height } = screenSize()
+    const scale = glScale(width, height, window.devicePixelRatio || 1)
+    canvas.width = Math.max(2, Math.floor(width * scale))
+    canvas.height = Math.max(2, Math.floor(height * scale))
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
     if (!ui) return
-    const box = stageFit(window.innerWidth, window.innerHeight)
+    const box = stageFit(width, height)
     ui.style.left = `${box.x}px`
     ui.style.top = `${box.y}px`
     ui.style.width = `${box.width}px`
@@ -30,6 +51,10 @@ export function createBrowserHost(): Host {
   }
   fit()
   window.addEventListener('resize', fit)
+  window.visualViewport?.addEventListener('resize', fit)
+  window.visualViewport?.addEventListener('scroll', () => {
+    if (fieldFocused()) window.scrollTo(0, 0)
+  })
   const screen = canvas as unknown as HostCanvas
   const video = document.getElementById('boot') as HTMLVideoElement | null
   const hit = ui ?? canvas
@@ -101,6 +126,20 @@ export function createBrowserHost(): Host {
       },
       playClip(clip, loop, spatial, x, y, z, refDistance, maxDistance): SpatialVoice {
         return start(clip as AudioBuffer, loop, spatial, x, y, z, refDistance, maxDistance)
+      },
+      beep(freq, seconds) {
+        const rate = ctx.sampleRate
+        const length = Math.max(1, Math.floor(rate * seconds))
+        const buffer = ctx.createBuffer(1, length, rate)
+        const data = buffer.getChannelData(0)
+        for (let i = 0; i < length; i++) {
+          const env = 1 - i / length
+          data[i] = Math.sin((i / rate) * freq * Math.PI * 2) * 0.22 * env
+        }
+        const source = ctx.createBufferSource()
+        source.buffer = buffer
+        source.connect(ctx.destination)
+        source.start()
       },
       decode(data: ArrayBuffer): Promise<AudioClip> {
         const copy = data.slice(0)
@@ -205,13 +244,14 @@ export function createBrowserHost(): Host {
     webAudio(): WebAudioHost | null {
       return ensureWeb()
     },
-    async login() { return 'browser-guest' },
+    async login() { return null },
     onHide() {},
     onShow() {},
     system() {
+      const { width, height } = screenSize()
       return {
-        width: window.innerWidth,
-        height: window.innerHeight,
+        width,
+        height,
         dpr: Math.min(window.devicePixelRatio || 1, 2),
         capsule: null,
       }
@@ -221,7 +261,8 @@ export function createBrowserHost(): Host {
         const r = ui.getBoundingClientRect()
         return { x: 0, y: 0, width: r.width, height: r.height }
       }
-      return stageFit(window.innerWidth, window.innerHeight)
+      const { width, height } = screenSize()
+      return stageFit(width, height)
     },
     launchSuccess() {},
     async network() { return navigator.onLine ? 'wifi' : 'none' },

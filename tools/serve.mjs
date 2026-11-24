@@ -24,7 +24,7 @@ function readEnv() {
   }
 }
 
-createServer((req, res) => {
+function onRequest(req, res) {
   const url = new URL(req.url || '/', 'http://localhost')
   if (url.pathname.startsWith('/wanos-api/')) {
     const target = new URL(readEnv().api.replace(/\/$/, '') + url.pathname.slice('/wanos-api'.length) + url.search)
@@ -54,6 +54,10 @@ createServer((req, res) => {
     'Cache-Control': 'no-store',
   })
   res.end(readFileSync(path))
-}).listen(port, () => {
-  console.log(`http://localhost:${port}`)
-})
+}
+
+for (const host of ['0.0.0.0', '::']) {
+  createServer(onRequest).listen(port, host, () => {
+    console.log(`http://${host}:${port}`)
+  })
+}

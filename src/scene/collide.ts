@@ -1,14 +1,10 @@
 /**
- * Walk movement. Collision and island airwalls are off for now.
- * Foot height still follows terrain, or the ocean surface when the ground is under the sea.
+ * Walk the meadow. Feet follow the ground. The pond and the outer rim stop the step.
  */
-import { height, setActivePreset, type SceneKind } from './island'
-import { OCEAN_Y } from './data/collision.gen'
+import { height, shoreDist, WALK_R, type SceneKind } from './island'
 
-export { OCEAN_Y }
-
-export const EYE_HEIGHT = 3
-export const MOVE_SPEED = 9
+export const EYE_HEIGHT = 1.7
+export const MOVE_SPEED = 6
 export const STICK_YAW_SPEED = 45
 
 export interface Solid {
@@ -23,22 +19,21 @@ export interface Solid {
   round: boolean
 }
 
-/** Foot height: terrain, or the ocean surface when the ground is under the sea. */
 export function footY(lx: number, lz: number): number {
-  const h = height(lx, lz)
-  return h < OCEAN_Y ? OCEAN_Y : h
+  return height(lx, lz)
 }
 
-export function buildSolids(scene: SceneKind | string): Solid[] {
-  setActivePreset(scene)
-  return []
-}
-
-export function canOccupy(_lx: number, _lz: number, _fromX: number, _fromZ: number, _solids: Solid[]): boolean {
+export function canOccupy(lx: number, lz: number, _fromX = lx, _fromZ = lz, _solids: Solid[] = []): boolean {
+  if (lx * lx + lz * lz > WALK_R * WALK_R) return false
+  if (shoreDist(lx, lz) < 0.85) return false
   return true
 }
 
-/** Collision is disabled, so the requested step is always taken. */
-export function tryMove(_x: number, _z: number, nx: number, nz: number, _solids: Solid[]): { x: number; z: number } {
+export function buildSolids(_scene: SceneKind | string): Solid[] {
+  return []
+}
+
+export function tryMove(x: number, z: number, nx: number, nz: number, solids: Solid[]): { x: number; z: number } {
+  if (!canOccupy(nx, nz, x, z, solids)) return { x, z }
   return { x: nx, z: nz }
 }

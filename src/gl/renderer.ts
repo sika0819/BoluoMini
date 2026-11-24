@@ -22,11 +22,20 @@ export interface FrameState {
   shadeSteps: number
   time: number
   tier: Tier
-  rain: boolean
+  /** 0..1 rain amount. Drives sky darkening and which streaks are drawn. */
+  rain: number
+  /** 0..1 ground mist. The forward pass folds it into the existing fog. */
+  mist: number
+  /** Sheet-lightning pulse. Sky only; no bolt mesh. */
+  flash: number
+  /** Sway scale. Higher wind gears move plants farther. */
+  wind: number
   /** 0 morning, 1 noon, 2 sunset, 3 night. Drives the sky gradient. */
   period: number
   /** 0..1 cumulus cover. */
   cover: number
+  /** 0..1 hunt darkening. Scales sun, sky, and the ambient floor. */
+  dim: number
   items: DrawItem[]
   outline: DrawItem[]
 }
@@ -84,6 +93,7 @@ export class Renderer {
   private meshes = new Map<MeshData, GpuMesh>()
   private quad: WebGLBuffer
   private leaf: WebGLTexture
+  private face: WebGLTexture
   private view = new Float32Array(16)
   private proj = new Float32Array(16)
   private viewProj = new Float32Array(16)
@@ -109,10 +119,17 @@ export class Renderer {
     this.leaf = gl.createTexture()!
     gl.bindTexture(gl.TEXTURE_2D, this.leaf)
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]))
+    this.face = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, this.face)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]))
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     this.ready = true
   }
 
-  private loadTex(target: WebGLTexture, url: string): void {
+  private loadTex(target: WebGLTexture, url: string, mip = false, flipY = true): void {
     const g = globalThis as unknown as {
       Image?: new () => HTMLImageElement
       wx?: { createImage?: () => HTMLImageElement }
@@ -127,10 +144,11 @@ export class Renderer {
     img.onload = () => {
       const gl = this.gl
       gl.bindTexture(gl.TEXTURE_2D, target)
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1)
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, flipY ? 1 : 0)
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img)
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      if (mip) gl.generateMipmap(gl.TEXTURE_2D)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
@@ -142,17 +160,32 @@ export class Renderer {
     this.loadTex(this.leaf, url)
   }
 
+  /**
+   * Eyes and mouth. Alpha is 0 on the rest of the body, which stays vertex color.
+   * UVs are glTF top-left, so the upload is not flipped.
+   */
+  loadFace(url: string): void {
+    this.loadTex(this.face, url, true, false)
+  }
+
   /** Every tier draws the same direct pass. */
   compileTier(_tier: Tier): void {}
 
   private gpu(mesh: MeshData): GpuMesh {
     const cached = this.meshes.get(mesh)
-    if (cached) return cached
+    if (cached) {
+      if (mesh.dynamic) {
+        const gl = this.gl
+        gl.bindBuffer(gl.ARRAY_BUFFER, cached.vbo)
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, mesh.interleaved)
+      }
+      return cached
+    }
     const gl = this.gl
     const vbo = gl.createBuffer()!
     const ibo = gl.createBuffer()!
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
-    gl.bufferData(gl.ARRAY_BUFFER, mesh.interleaved, gl.STATIC_DRAW)
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.interleaved, mesh.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW)
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo)
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW)
     const gpu = { vbo, ibo, count: mesh.indices.length }
@@ -192,7 +225,7 @@ export class Renderer {
     const w = Math.max(2, canvas.width)
     const h = Math.max(2, canvas.height)
     lookAt(frame.eye, frame.target, [0, 1, 0], this.view)
-    perspective(Math.PI / 3, w / h, 0.1, 200, this.proj)
+    perspective(Math.PI / 3, w / h, 0.15, 2800, this.proj)
     multiply(this.proj, this.view, this.viewProj)
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -242,13 +275,23 @@ export class Renderer {
     gl.uniform1f(u.uTan, Math.tan(Math.PI / 6))
     gl.uniform3fv(u.uSunDir, frame.sun)
     gl.uniform1f(u.uNight, look.night)
-    gl.uniform1f(u.uRain, frame.rain ? 1 : 0)
-    gl.uniform3fv(u.uZen, look.zen)
-    gl.uniform3fv(u.uMid, look.mid)
-    gl.uniform3fv(u.uLow, look.low)
-    gl.uniform3fv(u.uHor, look.hor)
-    gl.uniform3fv(u.uHorSun, look.horSun)
-    gl.uniform3fv(u.uDisc, look.disc)
+    gl.uniform1f(u.uRain, frame.rain)
+    gl.uniform1f(u.uTime, frame.time)
+    gl.uniform1f(u.uWind, frame.wind)
+    gl.uniform1f(u.uMist, frame.mist)
+    gl.uniform1f(u.uFlash, frame.flash)
+    const dusk = 1 - frame.dim * 0.78
+    const shade = (v: number[]) => [v[0] * dusk, v[1] * dusk, v[2] * dusk]
+    gl.uniform3fv(u.uZen, shade(look.zen))
+    gl.uniform3fv(u.uMid, shade(look.mid))
+    gl.uniform3fv(u.uLow, shade(look.low))
+    gl.uniform3fv(u.uHor, shade(look.hor))
+    gl.uniform3fv(u.uHorSun, shade(look.horSun))
+    gl.uniform3fv(u.uDisc, shade(look.disc))
+    gl.uniform3fv(u.uCloudLit, shade(look.cloudLit))
+    gl.uniform3fv(u.uCloudMid, shade(look.cloudMid))
+    gl.uniform3fv(u.uCloudSh, shade(look.cloudSh))
+    gl.uniform1f(u.uCover, frame.cover)
     const loc = this.sky.attribs.aPos
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad)
     gl.enableVertexAttribArray(loc)
@@ -270,15 +313,25 @@ export class Renderer {
     gl.uniform3fv(u.uFogColor, frame.fogColor)
     gl.uniform1f(u.uFogDensity, frame.fogDensity)
     gl.uniform1f(u.uTime, frame.time)
+    gl.uniform1f(u.uWind, frame.wind)
+    gl.uniform1f(u.uRain, frame.rain)
+    gl.uniform1f(u.uMist, frame.mist)
     gl.uniform3fv(u.uEye, frame.eye)
+    gl.uniform1f(u.uDim, frame.dim)
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this.leaf)
     gl.uniform1i(u.uLeaf, 0)
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, this.face)
+    if (u.uFace != null) gl.uniform1i(u.uFace, 1)
+    gl.activeTexture(gl.TEXTURE0)
     if (blended) {
       gl.enable(gl.BLEND)
       gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+      gl.depthMask(false)
     } else {
       gl.disable(gl.BLEND)
+      gl.depthMask(true)
     }
     for (const item of frame.items) {
       if (!!item.mesh.blended !== blended) continue

@@ -7,7 +7,8 @@
     "build:dev": "node tools/build.mjs --env=dev",
     "build:test": "node tools/build.mjs --env=test",
     "build:product": "node tools/build.mjs --env=product",
-    "serve": "node tools/serve.mjs"
+    "serve": "node tools/serve.mjs",
+    "run": "npm run build && npm run serve"
   },
   "devDependencies": {
     "esbuild": "0.24.2"

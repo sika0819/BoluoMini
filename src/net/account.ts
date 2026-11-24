@@ -90,13 +90,17 @@ export function currentUser(): BoluoUser | null {
   return user
 }
 
-export async function bootSession(): Promise<BoluoUser | null> {
+export async function cachedSession(): Promise<BoluoUser | null> {
   try {
     await ensureDevice(false)
   } catch {
     /* 设备票失败时仍优先用未过期的用户缓存 */
   }
-  const cached = reusableUser()
+  return reusableUser()
+}
+
+export async function bootSession(): Promise<BoluoUser | null> {
+  const cached = await cachedSession()
   if (cached) return cached
   return enterGuest()
 }
@@ -213,6 +217,35 @@ export async function pollWechat(sceneId: number): Promise<PollHit> {
   }
   if (result.code === 30000) return { kind: 'fail', message: result.msg || '二维码已失效' }
   return { kind: 'fail', message: result.msg || '网络连接失败，请检查网络' }
+}
+
+export async function loginWechatCode(authCode: string): Promise<BoluoUser> {
+  if (!authCode) throw new ApiFail(-1, '登录失败')
+  await ensureDevice(false)
+  const data = await postJson('/wanosuser/api/commonUser/wechatLogin', {
+    authCode,
+    latitude: 0,
+    longitude: 0,
+    accuracy: 0,
+  })
+  const next = readUser(data, false)
+  saveUser(next)
+  return next
+}
+
+export async function loginDouyinCode(code: string, anonymousCode: string): Promise<BoluoUser> {
+  if (!code && !anonymousCode) throw new ApiFail(-1, '登录失败')
+  await ensureDevice(false)
+  const data = await postJson('/wanosuser/api/commonUser/douyinLogin', {
+    code,
+    anonymousCode,
+    latitude: 0,
+    longitude: 0,
+    accuracy: 0,
+  })
+  const next = readUser(data, false)
+  saveUser(next)
+  return next
 }
 
 export async function bindWechatPhone(mobile: string, verifyCode: string, openId: string): Promise<BoluoUser> {

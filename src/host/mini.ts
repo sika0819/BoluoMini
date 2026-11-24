@@ -40,7 +40,11 @@ interface MiniApi {
   onTouchCancel?: (cb: (e: { changedTouches: { identifier: number; clientX: number; clientY: number }[] }) => void) => void
   onHide?: (cb: () => void) => void
   onShow?: (cb: () => void) => void
-  login?: (opts: { success?: (res: { code?: string }) => void; fail?: () => void }) => void
+  login?: (opts: {
+    force?: boolean
+    success?: (res: { code?: string; anonymousCode?: string }) => void
+    fail?: () => void
+  }) => void
   getNetworkType?: (opts: { success?: (res: { networkType?: string }) => void; fail?: () => void }) => void
   canIUse?: (name: string) => boolean
   launchSuccess?: () => void
@@ -153,6 +157,20 @@ function wrapWeb(api: MiniApi): WebAudioHost | null {
     },
     playClip(clip, loop, spatial, x, y, z, refDistance, maxDistance) {
       return start(clip as AudioBuffer, loop, spatial, x, y, z, refDistance, maxDistance)
+    },
+    beep(freq, seconds) {
+      const rate = ctx.sampleRate || 44100
+      const length = Math.max(1, Math.floor(rate * seconds))
+      const buffer = ctx.createBuffer(1, length, rate)
+      const data = buffer.getChannelData(0)
+      for (let i = 0; i < length; i++) {
+        const env = 1 - i / length
+        data[i] = Math.sin((i / rate) * freq * Math.PI * 2) * 0.22 * env
+      }
+      const source = ctx.createBufferSource()
+      source.buffer = buffer
+      source.connect(ctx.destination)
+      source.start()
     },
     decode(data) {
       return new Promise((resolve, reject) => {
@@ -288,7 +306,13 @@ export function createMiniHost(kind: HostKind, api: MiniApi, allowGlExtensions: 
       return new Promise((resolve) => {
         if (!api.login) { resolve(null); return }
         api.login({
-          success: (res) => resolve(res.code ?? null),
+          force: true,
+          success: (res) => {
+            const code = res.code || ''
+            const anonymousCode = res.anonymousCode || ''
+            if (!code && !anonymousCode) { resolve(null); return }
+            resolve({ code, anonymousCode })
+          },
           fail: () => resolve(null),
         })
       })

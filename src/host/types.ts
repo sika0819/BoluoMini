@@ -60,10 +60,18 @@ export interface WebAudioHost {
   ): SpatialVoice
   decode(data: ArrayBuffer): Promise<AudioClip>
   setListener(x: number, y: number, z: number, fx: number, fy: number, fz: number): void
+  /** Short non-spatial tone. Hit and miss feedback. */
+  beep(freq: number, seconds: number): void
   /** False while the context is waiting for a user gesture. */
   running(): boolean
   suspend(): void
   resume(): void
+}
+
+/** Code from wx.login / tt.login. Douyin also returns anonymousCode. */
+export interface PlatformCode {
+  code: string
+  anonymousCode: string
 }
 
 export interface Host {
@@ -86,7 +94,7 @@ export interface Host {
   storageRemove(key: string): void
   innerAudio(): InnerVoice
   webAudio(): WebAudioHost | null
-  login(): Promise<string | null>
+  login(): Promise<PlatformCode | null>
   onHide(cb: () => void): void
   onShow(cb: () => void): void
   system(): { width: number; height: number; dpr: number; capsule: Rect | null }

@@ -22,4 +22,4 @@ export function createHost(): Host {
   return createBrowserHost()
 }
 
-export type { Host, HostKind } from './types'
+export type { Host, HostKind, PlatformCode } from './types'

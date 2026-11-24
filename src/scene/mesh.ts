@@ -5,10 +5,12 @@ export interface MeshData {
   doubleSided?: boolean
   /** Clouds, rain, and falls. Opaque meshes skip blending so the GPU can reject hidden pixels. */
   blended?: boolean
-  /** Terrain keeps its mesh and is shaded with the painted-ground pass. */
-  role?: 'ground'
+  /** Terrain keeps its mesh and is shaded with the painted-ground pass. Trees join the same outline list. */
+  role?: 'ground' | 'tree'
   /** Drawn into the water mirror. Water surfaces stay out so the reflection cannot see itself. */
   reflect?: boolean
+  /** Positions change every frame. The renderer reuploads the vertex buffer. */
+  dynamic?: boolean
 }
 
 export type RGB = [number, number, number]
@@ -20,8 +22,15 @@ export const KIND_RAIN = 3
 export const KIND_FIRE = 4
 export const KIND_CLOUD = 5
 export const KIND_PROP = 6
+/** Player pineapple. Flat cartoon vertex color on the low-poly mesh. */
+export const KIND_ACTOR = 15
 export const KIND_WINDOW = 7
 export const KIND_FALLS = 8
+/**
+ * Bark stroke. Normal is the surface. Color is the grain direction, not a pigment.
+ * Kind is 9 plus 0.2 times the species (0 beech, 1 birch, 2 oak).
+ * UV is the signed half-size, across then along the grain.
+ */
 export const KIND_BARK = 9
 export const KIND_ROCK = 10
 /** Pineapple house — samples boluo1 BaseColor/Normal with authored UVs. */
@@ -30,6 +39,21 @@ export const KIND_BOLUO = 11
 export const KIND_DOCK = 12
 /** Wonderland leaf clump. Normal packs the billboard corner and size; UV is the leaf atlas. */
 export const KIND_LEAF = 13
+/**
+ * Autumn-wood crown touch. Normal is the outward direction of the clump.
+ * UV is the signed half-size of the stroke (across, along). The shader picks brush cells 4 and 5.
+ */
+export const KIND_CROWN = 14
+/**
+ * Wonderland wildflower. Kind is 16 plus 0.1 times the species
+ * (0 poppy, 1 daisy, 2 pink, 3 lupin, 4 yellow).
+ * A blossom fan shares one root. Normal xy is the unit disc, nz is 1 on a petal tip and 2 in a notch.
+ * UV is the radius in metres, then the height of the head.
+ * A stem uses nz 0, normal x as the side, normal y as the height fraction, and a negative UV height.
+ */
+export const KIND_FLOWER = 16
+/** Beat ring. Vertex color is the signal, not a lit surface. */
+export const KIND_BEAT = 17
 
 /** Floats per vertex: pos, normal, color, kind, uv. */
 export const FLOATS = 12
@@ -85,6 +109,112 @@ export class Builder {
     this.vertex(bx, by, bz, nx, ny, nz, c1, kind, uv[1][0], uv[1][1])
     this.vertex(cx, cy, cz, nx, ny, nz, c2, kind, uv[2][0], uv[2][1])
     this.vertex(dx, dy, dz, nx, ny, nz, c3, kind, uv[3][0], uv[3][1])
+    this.tri(i, i + 1, i + 2)
+    this.tri(i, i + 2, i + 3)
+  }
+
+  /**
+   * One camera-facing brush touch. Every corner shares the center.
+   * Normal xy is the signed half-size; nz stays 1 so the shader can recover it after normalization.
+   * Cell is a mark on oil/brush.png (4 columns, 2 rows, row 0 at the top).
+   */
+  stroke(
+    x: number, y: number, z: number,
+    hx: number, hy: number,
+    foot: RGB, tip: RGB,
+    cell: number,
+    flipU = false,
+  ): void {
+    const col = cell % 4
+    const row = (cell / 4) | 0
+    const u0 = col / 4
+    const u1 = u0 + 0.25
+    const vTop = (2 - row) / 2
+    const vBot = vTop - 0.5
+    const ul = flipU ? u1 : u0
+    const ur = flipU ? u0 : u1
+    const i = this.vertex(x, y, z, -hx, -hy, 1, foot, KIND_LEAF, ul, vBot)
+    this.vertex(x, y, z, hx, -hy, 1, foot, KIND_LEAF, ur, vBot)
+    this.vertex(x, y, z, hx, hy, 1, tip, KIND_LEAF, ur, vTop)
+    this.vertex(x, y, z, -hx, hy, 1, tip, KIND_LEAF, ul, vTop)
+    this.tri(i, i + 1, i + 2)
+    this.tri(i, i + 2, i + 3)
+  }
+
+  private vertexRaw(
+    x: number, y: number, z: number,
+    nx: number, ny: number, nz: number,
+    color: RGB, kind: number,
+    u = 0, v = 0,
+  ): number {
+    const i = this.verts.length / FLOATS
+    this.verts.push(x, y, z, nx, ny, nz, color[0], color[1], color[2], kind, u, v)
+    return i
+  }
+
+  /**
+   * One bark stroke. It faces the camera and runs along the grain.
+   * hx and hy are half-sizes in metres. Species is 0 beech, 1 birch, 2 oak.
+   */
+  barkDab(
+    x: number, y: number, z: number,
+    nx: number, ny: number, nz: number,
+    dx: number, dy: number, dz: number,
+    hx: number, hy: number,
+    species: number,
+  ): void {
+    const kind = KIND_BARK + species * 0.2
+    const i = this.vertexRaw(x, y, z, nx, ny, nz, [dx, dy, dz], kind, -hx, -hy)
+    this.vertexRaw(x, y, z, nx, ny, nz, [dx, dy, dz], kind, hx, -hy)
+    this.vertexRaw(x, y, z, nx, ny, nz, [dx, dy, dz], kind, hx, hy)
+    this.vertexRaw(x, y, z, nx, ny, nz, [dx, dy, dz], kind, -hx, hy)
+    this.tri(i, i + 1, i + 2)
+    this.tri(i, i + 2, i + 3)
+  }
+
+  /**
+   * One wonderland blossom: ten petals around a centre, facing the camera in the shader.
+   * radius is half the width. rise is how far above the root the head sits.
+   */
+  blossom(x: number, y: number, z: number, radius: number, rise: number, species: number): void {
+    const kind = KIND_FLOWER + species * 0.1
+    const color: RGB = [1, 1, 1]
+    const rim = 10
+    const i = this.vertexRaw(x, y, z, 0, 0, 1, color, kind, radius, rise)
+    for (let k = 0; k < rim; k++) {
+      const a = (k / rim) * Math.PI * 2
+      this.vertexRaw(x, y, z, Math.cos(a), Math.sin(a), k % 2 ? 2 : 1, color, kind, radius, rise)
+    }
+    for (let k = 0; k < rim; k++) this.tri(i, i + 1 + k, i + 1 + ((k + 1) % rim))
+  }
+
+  /** Thin stem under a blossom. rise is the full height. The shader keeps it facing the camera. */
+  flowerStem(x: number, y: number, z: number, rise: number, species: number): void {
+    const kind = KIND_FLOWER + species * 0.1
+    const color: RGB = [0.3, 0.46, 0.22]
+    const hw = 0.012
+    const i = this.vertexRaw(x, y, z, -1, 0, 0, color, kind, hw, -rise)
+    this.vertexRaw(x, y, z, 1, 0, 0, color, kind, hw, -rise)
+    this.vertexRaw(x, y, z, -1, 1, 0, color, kind, hw, -rise)
+    this.vertexRaw(x, y, z, 1, 1, 0, color, kind, hw, -rise)
+    this.tri(i, i + 1, i + 2)
+    this.tri(i + 1, i + 3, i + 2)
+  }
+
+  /**
+   * One crown stroke from the autumn wood. It faces the camera, runs across the clump's
+   * outline, and is longer along the stroke than across it. hx and hy are half-sizes in metres.
+   */
+  dab(
+    x: number, y: number, z: number,
+    nx: number, ny: number, nz: number,
+    hx: number, hy: number,
+    color: RGB,
+  ): void {
+    const i = this.vertexRaw(x, y, z, nx, ny, nz, color, KIND_CROWN, -hx, -hy)
+    this.vertexRaw(x, y, z, nx, ny, nz, color, KIND_CROWN, hx, -hy)
+    this.vertexRaw(x, y, z, nx, ny, nz, color, KIND_CROWN, hx, hy)
+    this.vertexRaw(x, y, z, nx, ny, nz, color, KIND_CROWN, -hx, hy)
     this.tri(i, i + 1, i + 2)
     this.tri(i, i + 2, i + 3)
   }
@@ -193,6 +323,10 @@ export class Builder {
 
   get empty(): boolean {
     return this.idx.length === 0
+  }
+
+  get indexCount(): number {
+    return this.idx.length
   }
 }
 

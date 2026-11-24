@@ -1,744 +1,1309 @@
 /**
- * Build per-preset local scenes from CustomSRP layout data (shared height + windowed items).
+ * One meadow, matched to beautiful-wonderland: rolling ground, pond, grass, flowers.
+ * Counts are thinned so the meshes stay inside the WebGL index limit.
  */
 import {
-  cover, height, heightWorld, SEA, SCENE_SPAWN, setActivePreset, SHORE, slope,
-  toLocal, type SceneKind,
+  fbm2, FOREST_POS, forestAmount, height, HILL_POS, pathDist, pondRadius, SCENE_SPAWN,
+  shoreDist, smoothstep, TERRAIN_SIZE, valueNoise2, type SceneKind,
 } from './island'
-import { pineappleHouse } from './house'
 import {
-  Builder, emptyMesh, hash, KIND_CLOUD, KIND_FALLS, KIND_GRASS, KIND_GROUND,
-  KIND_PROP, KIND_RAIN, KIND_WATER, shade, type MeshData, type RGB,
+  Builder, emptyMesh, hash, KIND_PROP, KIND_RAIN, type MeshData, type RGB,
 } from './mesh'
-import {
-  addBarrel, addBench, addBridge, addButterflies, addCampfire, addCanoe, addCliff,
-  addCrate, addDeadTree, addDock, addFarmhouse, addFence, addFlower, addMountain,
-  addShed, addTent, addWagon, finishProps, newPropBuilder,
-} from './props'
-import { ITEMS, PRESET_LAYOUTS, WINDOW_R, type LayoutItem } from './data/layout.gen'
-import { buildPlaced } from './placed'
-import { OCEAN_Y } from './collide'
-import { FALLS_SPECS, RIVER_PATHS, type FallsSpec, type RiverPath } from './data/water.gen'
 
 export type { MeshData, SceneKind }
-export { height, SEA, SHORE, SCENE_SPAWN }
+export { height, SCENE_SPAWN }
 
-export {
-  KIND_GROUND, KIND_WATER, KIND_GRASS, KIND_RAIN, KIND_FIRE, KIND_CLOUD, KIND_PROP,
-} from './mesh'
+/** Same edge length as the rendered ground quads. */
+const TERRAIN_STEP = 4
 
-const SAND: RGB = [0.76, 0.68, 0.48]
-const GROUND: RGB = [0.36, 0.52, 0.22]
-const ROCK: RGB = [0.48, 0.46, 0.42]
-const BARK: RGB = [0.42, 0.30, 0.18]
-const LEAF_TOP: RGB = [0.50, 0.74, 0.18]
-const LEAF_BOTTOM: RGB = [0.24, 0.44, 0.10]
-const CLOUD: RGB = [0.93, 0.94, 0.96]
-const WATER: RGB = [0.16, 0.52, 0.72]
-const FOAM: RGB = [0.82, 0.9, 0.94]
+const GRASS_A: RGB = [0.706, 0.867, 0.322]
+const GRASS_B: RGB = [0.455, 0.725, 0.278]
+const GRASS_C: RGB = [0.843, 0.875, 0.400]
+const GRASS_TIP: RGB = [0.914, 0.961, 0.557]
+const WATER_DEEP: RGB = [0.09, 0.34, 0.60]
+const LEAF_HI: RGB = [0.902, 0.941, 0.486]
+const LEAF_LIGHT: RGB = [0.624, 0.816, 0.322]
+const LEAF_MID: RGB = [0.310, 0.616, 0.294]
+const LEAF_DARK: RGB = [0.122, 0.314, 0.275]
+/** Tube under the bark strokes. A little darker than the strokes, so a gap still reads as wood. */
+const BARK_UNDER: RGB = [0.38, 0.27, 0.18]
+/** Birch trunk under the strokes. */
+const BIRCH_WHITE: RGB = [0.97, 0.96, 0.93]
+const WATER_SHALLOW: RGB = [0.42, 0.74, 0.90]
+const WATER_MID: RGB = [0.22, 0.55, 0.80]
 
-type Spot = { x: number; z: number; scale: number; kind: 'pine' | 'leaf' | 'palm' | 'bush'; yaw: number }
+/** Stem height range, then blossom width, matching the wonderland kinds. */
+const FLOWER_HEAD: Array<{ h0: number; h1: number; d0: number; d1: number }> = [
+  { h0: 0.34, h1: 0.58, d0: 0.18, d1: 0.26 },
+  { h0: 0.18, h1: 0.36, d0: 0.13, d1: 0.18 },
+  { h0: 0.28, h1: 0.50, d0: 0.15, d1: 0.22 },
+  { h0: 0.50, h1: 0.85, d0: 0.16, d1: 0.22 },
+  { h0: 0.17, h1: 0.34, d0: 0.12, d1: 0.16 },
+]
 
-function terrainMesh(): MeshData {
-  const b = new Builder()
-  const half = WINDOW_R + 8
-  const step = 2.0
-  const n = Math.floor((half * 2) / step) + 1
-  // Pre-sample + light blur so adjacent verts share one height (no cracks / pits).
-  const ys = new Float32Array(n * n)
-  for (let iz = 0; iz < n; iz++) {
-    for (let ix = 0; ix < n; ix++) {
-      ys[iz * n + ix] = height(-half + ix * step, -half + iz * step)
-    }
-  }
-  const smooth = new Float32Array(n * n)
-  for (let iz = 0; iz < n; iz++) {
-    for (let ix = 0; ix < n; ix++) {
-      let sum = 0, w = 0
-      for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const x = ix + dx, z = iz + dz
-          if (x < 0 || z < 0 || x >= n || z >= n) continue
-          const ww = dx === 0 && dz === 0 ? 2 : 1
-          sum += ys[z * n + x] * ww
-          w += ww
-        }
-      }
-      smooth[iz * n + ix] = sum / w
-    }
-  }
-  // Clamp neighbor deltas so one bad sample cannot punch a hole.
-  for (let iz = 0; iz < n; iz++) {
-    for (let ix = 0; ix < n; ix++) {
-      const i = iz * n + ix
-      let lo = smooth[i], hi = smooth[i]
-      for (let dz = -1; dz <= 1; dz++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          if (dx === 0 && dz === 0) continue
-          const x = ix + dx, z = iz + dz
-          if (x < 0 || z < 0 || x >= n || z >= n) continue
-          const v = smooth[z * n + x]
-          if (v < lo) lo = v
-          if (v > hi) hi = v
-        }
-      }
-      const mid = (lo + hi) * 0.5
-      const maxDelta = 6
-      if (smooth[i] < mid - maxDelta) smooth[i] = mid - maxDelta
-      if (smooth[i] > mid + maxDelta) smooth[i] = mid + maxDelta
-    }
-  }
-  for (let iz = 0; iz < n - 1; iz++) {
-    for (let ix = 0; ix < n - 1; ix++) {
-      const x0 = -half + ix * step
-      const z0 = -half + iz * step
-      const x1 = x0 + step
-      const z1 = z0 + step
-      const y00 = smooth[iz * n + ix]
-      const y10 = smooth[iz * n + ix + 1]
-      const y01 = smooth[(iz + 1) * n + ix]
-      const y11 = smooth[(iz + 1) * n + ix + 1]
-      const c00 = y00 < 1.0 ? SAND : y00 > 85 || slope(x0, z0) > 0.55 ? ROCK : GROUND
-      const c10 = y10 < 1.0 ? SAND : y10 > 85 || slope(x1, z0) > 0.55 ? ROCK : GROUND
-      const c01 = y01 < 1.0 ? SAND : y01 > 85 || slope(x0, z1) > 0.55 ? ROCK : GROUND
-      const c11 = y11 < 1.0 ? SAND : y11 > 85 || slope(x1, z1) > 0.55 ? ROCK : GROUND
-      // Ref below the quad so face() always keeps an upward normal (no backface holes).
-      const minY = Math.min(y00, y10, y01, y11)
-      const cx = (x0 + x1) * 0.5
-      const cz = (z0 + z1) * 0.5
-      b.face(
-        [x0, y00, z0], [x1, y10, z0], [x1, y11, z1], [x0, y01, z1],
-        [shade(c00, x0, z0), shade(c10, x1, z0), shade(c11, x1, z1), shade(c01, x0, z1)],
-        KIND_GROUND, cx, minY - 4, cz,
-      )
-    }
-  }
-  // doubleSided: belt-and-suspenders against any remaining winding flips
-  const mesh = b.finish(true, true)
-  mesh.role = 'ground'
-  return mesh
+const ZONES: Array<[number, number, number, number]> = [
+  [58, 12, 70, 1],
+  [75, 60, 80, 1],
+  [-112, -74, 75, 1],
+  [-48, 14, 45, 0.8],
+  [88, -58, 55, 0.7],
+  [70, -118, 35, 0.5],
+]
+
+function mix(a: RGB, b: RGB, t: number): RGB {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 }
 
-function waterMesh(): MeshData {
-  const b = new Builder()
-  // One giant quad crosses the camera and gets clipped away. A grid stays visible.
-  const half = 220
-  const y = OCEAN_Y - 0.02
-  const step = 16
-  const n = Math.round((half * 2) / step)
-  for (let j = 0; j < n; j++) {
-    for (let i = 0; i < n; i++) {
-      const x0 = -half + i * step
-      const z0 = -half + j * step
-      const x1 = x0 + step
-      const z1 = z0 + step
-      b.quad(x0, y, z0, x1, y, z0, x1, y, z1, x0, y, z1, WATER, KIND_WATER, (x0 + x1) * 0.5, y - 4, (z0 + z1) * 0.5)
+function mul(c: RGB, s: number): RGB {
+  return [c[0] * s, c[1] * s, c[2] * s]
+}
+
+function groundColor(x: number, z: number): RGB {
+  // Colour lives on the 4m lattice. Finer noise freezes into one flat square per cell.
+  // Two octaves stay near 18m; 31/24 puts that sum back on the old five-octave range.
+  const n1 = fbm2(x * 0.028, z * 0.028, 2) * (31 / 24)
+  const n2 = valueNoise2(x * 0.0085 + 7.3, z * 0.0085)
+  const n3 = valueNoise2(x * 0.04 + 2.1, z * 0.04)
+  let c = mix(GRASS_A, GRASS_B, smoothstep(0.36, 0.64, n1))
+  c = mix(c, GRASS_C, smoothstep(0.5, 0.78, n2) * 0.6)
+  c = mul(c, 0.95 + 0.1 * n3)
+  c = mix(c, [GRASS_B[0] * 0.62, GRASS_B[1] * 0.74, GRASS_B[2] * 0.76], forestAmount(x, z) * 0.8)
+  const dirt = mix([0.78, 0.72, 0.58], [0.66, 0.64, 0.56], n3)
+  const wobble = pathDist(x, z) + (valueNoise2(x * 0.35, z * 0.35) - 0.5) * 1.6
+  const path = smoothstep(3.1, 1.5, wobble)
+  c = mix(c, dirt, path * 0.42 * (0.55 + 0.45 * smoothstep(0.35, 0.6, n1 + n3 * 0.3)))
+  return c
+}
+
+class Bag {
+  readonly meshes: MeshData[] = []
+  private b = new Builder()
+  constructor(private shadow: boolean, private side: boolean, private role?: MeshData['role']) {}
+
+  room(extra: number): Builder {
+    if (this.b.indexCount + extra > 60000) this.flush()
+    return this.b
+  }
+
+  flush(): void {
+    if (this.b.empty) return
+    const mesh = this.b.finish(this.shadow, this.side)
+    if (this.role) mesh.role = this.role
+    this.meshes.push(mesh)
+    this.b = new Builder()
+  }
+
+  finish(): MeshData[] {
+    this.flush()
+    return this.meshes
+  }
+}
+
+function terrainMeshes(): MeshData[] {
+  const step = TERRAIN_STEP
+  const half = TERRAIN_SIZE / 2
+  const n = half / step
+  const out: MeshData[] = []
+  for (const x0 of [-half, 0]) {
+    for (const z0 of [-half, 0]) {
+      const b = new Builder()
+      const cols = n + 1
+      const span = n + 3
+      const h: number[] = []
+      for (let j = -1; j <= n + 1; j++) {
+        for (let i = -1; i <= n + 1; i++) h.push(height(x0 + i * step, z0 + j * step))
+      }
+      const at = (i: number, j: number) => h[(j + 1) * span + (i + 1)]
+      const ids: number[] = []
+      for (let j = 0; j <= n; j++) {
+        for (let i = 0; i <= n; i++) {
+          const x = x0 + i * step
+          const z = z0 + j * step
+          const dx = at(i - 1, j) - at(i + 1, j)
+          const dz = at(i, j - 1) - at(i, j + 1)
+          const ny = 2 * step
+          ids.push(b.vertex(x, at(i, j), z, dx, ny, dz, groundColor(x, z), 0))
+        }
+      }
+      for (let j = 0; j < n; j++) {
+        for (let i = 0; i < n; i++) {
+          const a = ids[j * cols + i]
+          const bv = ids[j * cols + i + 1]
+          const c = ids[(j + 1) * cols + i + 1]
+          const d = ids[(j + 1) * cols + i]
+          b.tri(a, bv, c)
+          b.tri(a, c, d)
+        }
+      }
+      const mesh = b.finish(true, true)
+      mesh.role = 'ground'
+      out.push(mesh)
     }
   }
-  const mesh = b.finish(false, true)
+  return out
+}
+
+export interface GroundContact {
+  x: number
+  y: number
+  z: number
+  nx: number
+  ny: number
+  nz: number
+}
+
+/** Cell origin on the same 4m lattice the ground mesh uses. */
+function cellOrigin(v: number): number {
+  const half = TERRAIN_SIZE / 2
+  const i = Math.floor((v + half) / TERRAIN_STEP)
+  const maxI = Math.floor(TERRAIN_SIZE / TERRAIN_STEP) - 1
+  return -half + Math.max(0, Math.min(maxI, i)) * TERRAIN_STEP
+}
+
+interface GroundCell {
+  xa: number
+  za: number
+  xb: number
+  zb: number
+  y00: number
+  y10: number
+  y11: number
+  y01: number
+  u: number
+  v: number
+}
+
+/** Quad corners match terrainMeshes: a, b, c, d with diagonal a–c. */
+function groundCell(x: number, z: number): GroundCell {
+  const xa = cellOrigin(x)
+  const za = cellOrigin(z)
+  const xb = xa + TERRAIN_STEP
+  const zb = za + TERRAIN_STEP
+  const u = Math.max(0, Math.min(1, (x - xa) / TERRAIN_STEP))
+  const v = Math.max(0, Math.min(1, (z - za) / TERRAIN_STEP))
+  return {
+    xa, za, xb, zb,
+    y00: height(xa, za),
+    y10: height(xb, za),
+    y11: height(xb, zb),
+    y01: height(xa, zb),
+    u, v,
+  }
+}
+
+function upward(
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  cx: number, cy: number, cz: number,
+): [number, number, number] {
+  const ux = bx - ax
+  const uy = by - ay
+  const uz = bz - az
+  const vx = cx - ax
+  const vy = cy - ay
+  const vz = cz - az
+  let nx = uy * vz - uz * vy
+  let ny = uz * vx - ux * vz
+  let nz = ux * vy - uy * vx
+  if (ny < 0) {
+    nx = -nx
+    ny = -ny
+    nz = -nz
+  }
+  const len = Math.hypot(nx, ny, nz) || 1
+  return [nx / len, ny / len, nz / len]
+}
+
+/** Height on the rendered triangle, not the smooth height field. */
+export function groundHeight(x: number, z: number): number {
+  const c = groundCell(x, z)
+  if (c.u >= c.v) return c.y00 * (1 - c.u) + c.y10 * (c.u - c.v) + c.y11 * c.v
+  return c.y00 * (1 - c.v) + c.y11 * c.u + c.y01 * (c.v - c.u)
+}
+
+/** Contact on the ground triangle under (x, z), with an upward unit normal. */
+export function groundContact(x: number, z: number): GroundContact {
+  const c = groundCell(x, z)
+  const px = c.xa + c.u * TERRAIN_STEP
+  const pz = c.za + c.v * TERRAIN_STEP
+  if (c.u >= c.v) {
+    const [nx, ny, nz] = upward(c.xa, c.y00, c.za, c.xb, c.y10, c.za, c.xb, c.y11, c.zb)
+    return {
+      x: px,
+      y: c.y00 * (1 - c.u) + c.y10 * (c.u - c.v) + c.y11 * c.v,
+      z: pz,
+      nx, ny, nz,
+    }
+  }
+  const [nx, ny, nz] = upward(c.xa, c.y00, c.za, c.xb, c.y11, c.zb, c.xa, c.y01, c.zb)
+  return {
+    x: px,
+    y: c.y00 * (1 - c.v) + c.y11 * c.u + c.y01 * (c.v - c.u),
+    z: pz,
+    nx, ny, nz,
+  }
+}
+
+interface Wet {
+  x: number
+  z: number
+  h: number
+  color: RGB
+  depth: number
+}
+
+/** Water stops where the ground rises through the surface, the same test as the reference pond. */
+function waterMesh(): MeshData {
+  const b = new Builder()
+  const step = 4
+  const reach = 92
+  const y = 0.03
+  const line = 0.02
+  const tone = (px: number, pz: number, h: number): Wet => {
+    const sd = shoreDist(px, pz)
+    const color = sd > -6 ? WATER_SHALLOW : sd > -18 ? WATER_MID : WATER_DEEP
+    return { x: px, z: pz, h, color, depth: Math.max(0, line - h) }
+  }
+  const cut = (a: Wet, c: Wet): Wet => {
+    const t = (line - a.h) / (c.h - a.h)
+    return {
+      x: a.x + (c.x - a.x) * t,
+      z: a.z + (c.z - a.z) * t,
+      h: line,
+      color: mix(a.color, c.color, t),
+      depth: 0,
+    }
+  }
+  const keepWet = (poly: Wet[]): Wet[] => {
+    const out: Wet[] = []
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i]
+      const c = poly[(i + 1) % poly.length]
+      const aIn = a.h <= line
+      const cIn = c.h <= line
+      if (aIn && cIn) out.push(c)
+      else if (aIn && !cIn) out.push(cut(a, c))
+      else if (!aIn && cIn) {
+        out.push(cut(a, c))
+        out.push(c)
+      }
+    }
+    return out
+  }
+  for (let z = -reach; z < reach; z += step) {
+    for (let x = -reach; x < reach; x += step) {
+      const cx = x + step * 0.5
+      const cz = z + step * 0.5
+      if (shoreDist(cx, cz) > 7) continue
+      const raw = [
+        tone(x, z, height(x, z)),
+        tone(x + step, z, height(x + step, z)),
+        tone(x + step, z + step, height(x + step, z + step)),
+        tone(x, z + step, height(x, z + step)),
+      ]
+      if (Math.min(raw[0].h, raw[1].h, raw[2].h, raw[3].h) > line) continue
+      const poly = keepWet(raw)
+      if (poly.length < 3) continue
+      for (let i = 1; i < poly.length - 1; i++) {
+        const p0 = poly[0]
+        const p1 = poly[i]
+        const p2 = poly[i + 1]
+        const area = (p1.x - p0.x) * (p2.z - p0.z) - (p2.x - p0.x) * (p1.z - p0.z)
+        if (Math.abs(area) < 0.05) continue
+        const i0 = b.vertex(p0.x, y, p0.z, 0, 1, 0, p0.color, 1, p0.depth, 0)
+        b.vertex(p1.x, y, p1.z, 0, 1, 0, p1.color, 1, p1.depth, 0)
+        b.vertex(p2.x, y, p2.z, 0, 1, 0, p2.color, 1, p2.depth, 0)
+        b.tri(i0, i0 + 1, i0 + 2)
+      }
+    }
+  }
+  const mesh = b.empty ? emptyMesh() : b.finish(false, false)
   mesh.reflect = false
   return mesh
 }
 
-function addPrism(
-  b: Builder,
-  x0: number, y0: number, z0: number, r0: number,
-  x1: number, y1: number, z1: number, r1: number,
-  color: RGB,
-): void {
-  const sides = 5
-  const refX = (x0 + x1) * 0.5
-  const refY = (y0 + y1) * 0.5
-  const refZ = (z0 + z1) * 0.5
-  for (let i = 0; i < sides; i++) {
-    const a0 = (i / sides) * Math.PI * 2
-    const a1 = ((i + 1) / sides) * Math.PI * 2
-    const c0 = Math.cos(a0), s0 = Math.sin(a0)
-    const c1 = Math.cos(a1), s1 = Math.sin(a1)
-    b.quad(
-      x0 + c0 * r0, y0, z0 + s0 * r0,
-      x0 + c1 * r0, y0, z0 + s1 * r0,
-      x1 + c1 * r1, y1, z1 + s1 * r1,
-      x1 + c0 * r1, y1, z1 + s0 * r1,
-      color, KIND_PROP, refX, refY, refZ,
-    )
+function zoneDensity(x: number, z: number): number {
+  const r0 = Math.hypot(x, z)
+  let d = 0.12 * (1 - smoothstep(215, 260, r0))
+  for (const [zx, zz, radius, w] of ZONES) {
+    const r = Math.hypot(x - zx, z - zz)
+    if (r < radius) d = Math.max(d, w * (1 - smoothstep(radius * 0.6, radius, r)))
   }
+  return d
 }
 
-function addLeafCard(
-  b: Builder,
-  x: number, y: number, z: number,
-  yaw: number, w: number, h: number, lean: number,
-): void {
-  const c = Math.cos(yaw), s = Math.sin(yaw)
-  const tipX = x + Math.sin(yaw) * lean
-  const tipZ = z - Math.cos(yaw) * lean
-  b.card(
-    x - c * w, y, z - s * w,
-    x + c * w, y, z + s * w,
-    tipX + c * w * 0.45, y + h, tipZ + s * w * 0.45,
-    tipX - c * w * 0.45, y + h, tipZ - s * w * 0.45,
-    LEAF_BOTTOM, LEAF_BOTTOM, LEAF_TOP, LEAF_TOP, KIND_GRASS,
-  )
+function tuftWeight(x: number, z: number): number {
+  const d = zoneDensity(x, z)
+  if (d <= 0 || height(x, z) < 0.06) return 0
+  if (onJetty(x, z)) return 0
+  const sd = Math.hypot(x, z) > 86 ? 99 : shoreDist(x, z)
+  if (sd < 0.3) return 0
+  let w = d * (0.35 + 0.65 * smoothstep(0.5, 3.2, sd))
+  const pd = pathDist(x, z)
+  w *= 0.15 + 0.85 * smoothstep(2.0, 4.2, pd)
+  const forest = Math.hypot(x - FOREST_POS.x, z - FOREST_POS.z) > FOREST_POS.r + 26 ? 0 : forestAmount(x, z)
+  w *= 1 - 0.65 * forest
+  const m = 0.42 * fbm2(x * 0.07 + 5.3, z * 0.07 + 9.1, 3) / 0.875
+    + 0.58 * valueNoise2(x * 0.4 + 1.7, z * 0.4 + 7.9)
+  return w * (0.08 + 0.92 * smoothstep(0.37, 0.53, m))
 }
 
-function addTree(b: Builder, tree: Spot): void {
-  const y = height(tree.x, tree.z) - 0.05
-  const s = tree.scale
-  if (tree.kind === 'bush') {
-    for (let i = 0; i < 5; i++) {
-      addLeafCard(b, tree.x + Math.cos(i * 1.25) * 0.12 * s, y, tree.z + Math.sin(i * 1.25) * 0.12 * s, i * 1.25, 0.28 * s, 0.55 * s, 0.08 * s)
-    }
-    return
-  }
-  if (tree.kind === 'palm') {
-    const yaw = tree.yaw || hash(tree.x, tree.z) * Math.PI * 2
-    const tall = 2.6 * s
-    for (let i = 0; i < 5; i++) {
-      const t0 = i / 5, t1 = (i + 1) / 5
-      const lean0 = t0 * t0 * 1.1 * s
-      const lean1 = t1 * t1 * 1.1 * s
-      addPrism(
-        b,
-        tree.x + Math.cos(yaw) * lean0, y + t0 * tall, tree.z + Math.sin(yaw) * lean0, (0.15 - t0 * 0.05) * s,
-        tree.x + Math.cos(yaw) * lean1, y + t1 * tall, tree.z + Math.sin(yaw) * lean1, (0.15 - t1 * 0.05) * s,
-        BARK,
-      )
-    }
-    const topX = tree.x + Math.cos(yaw) * 1.1 * s
-    const topZ = tree.z + Math.sin(yaw) * 1.1 * s
-    const topY = y + tall
-    for (let i = 0; i < 6; i++) {
-      const a = yaw + (i / 6) * Math.PI * 2
-      const len = 1.55 * s
-      const dx = Math.cos(a), dz = Math.sin(a)
-      const px = -dz, pz = dx
-      b.card(
-        topX + px * 0.06, topY, topZ + pz * 0.06,
-        topX - px * 0.06, topY, topZ - pz * 0.06,
-        topX + dx * len - px * 0.28, topY + 0.2 * s - 0.35 * s, topZ + dz * len - pz * 0.28,
-        topX + dx * len + px * 0.28, topY + 0.2 * s - 0.35 * s, topZ + dz * len + pz * 0.28,
-        LEAF_BOTTOM, LEAF_BOTTOM, LEAF_TOP, LEAF_TOP, KIND_GRASS,
-      )
-    }
-    return
-  }
-  if (tree.kind === 'pine') {
-    addPrism(b, tree.x, y, tree.z, 0.14 * s, tree.x, y + 1.5 * s, tree.z, 0.06 * s, BARK)
-    for (let layer = 0; layer < 3; layer++) {
-      const yy = y + (1.0 + layer * 0.72) * s
-      const rad = (1.05 - layer * 0.28) * s
-      const hh = (0.85 - layer * 0.08) * s
-      for (let i = 0; i < 6; i++) {
-        addLeafCard(b, tree.x, yy, tree.z, (i / 6) * Math.PI * 2 + layer * 0.2, rad * 0.55, hh, rad * 0.35)
+/** A grass flick: one upright brush stroke, foot and tip keep the colours already on the blade. */
+function addFlick(b: Builder, x: number, y: number, z: number, tall: number, wide: number, foot: RGB, tip: RGB, cell: number, flip: boolean): void {
+  const hy = tall * 0.62
+  b.stroke(x, y + hy * 0.8, z, wide, hy, foot, tip, cell, flip)
+}
+
+function grassMeshes(): MeshData[] {
+  const bag = new Bag(false, true)
+  const step = 1.7
+  const extent = 250
+  const n = Math.floor((extent * 2) / step)
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const x = -extent + (i + 0.5) * step
+      const z = -extent + (j + 0.5) * step
+      const w = tuftWeight(x, z)
+      if (w < 0.1 || hash(x, z) > Math.min(0.7, w * 0.95)) continue
+      const y = height(x, z)
+      const g = groundColor(x, z)
+      const foot = mul(mix(g, [g[0] * 0.68, g[1] * 0.83, g[2] * 0.9], 0.65), 0.92 + hash(x + 3, z) * 0.12)
+      const tip = mix(g, GRASS_TIP, 0.62 + hash(x, z + 4) * 0.2)
+      const tall = (0.22 + 0.26 * valueNoise2(x * 0.035 + 40.5, z * 0.035 + 17.3)) * (0.85 + hash(x + 1, z + 1) * 0.3)
+      const yaw0 = hash(x + 8, z + 2) * Math.PI * 2
+      const b = bag.room(12)
+      for (let k = 0; k < 2; k++) {
+        const a = yaw0 + k * 2.1
+        const rr = 0.05 + hash(x + k * 3, z - k) * 0.12
+        const cell = hash(x + k * 5, z + 9) > 0.84 ? 3 : k
+        addFlick(
+          b, x + Math.cos(a) * rr, y, z + Math.sin(a) * rr,
+          tall * (0.72 + hash(x + k, z) * 0.45),
+          0.12 + hash(z, x + k) * 0.05,
+          foot, tip, cell, hash(x + 4, z + k) > 0.5,
+        )
       }
     }
+  }
+  for (let i = 0; i < 90; i++) {
+    const th = (i / 90) * Math.PI * 2
+    const r = pondRadius(th) + 1.1 + hash(i, 3) * 2.4
+    const x = Math.cos(th) * r
+    const z = Math.sin(th) * r
+    if (height(x, z) < 0.05) continue
+    const y = height(x, z)
+    const b = bag.room(12)
+    const foot: RGB = [0.20, 0.38, 0.22]
+    const tip: RGB = [0.55, 0.72, 0.32]
+    addFlick(b, x, y, z, 1.15 + hash(x, i) * 0.45, 0.055, foot, tip, 0, false)
+    addFlick(b, x + 0.12, y, z + 0.06, 0.95, 0.05, foot, tip, 2, true)
+  }
+  return bag.finish()
+}
+
+function flowerWeights(x: number, z: number, out: number[]): number {
+  out[0] = out[1] = out[2] = out[3] = out[4] = 0
+  if (Math.hypot(x, z) > 250) return 0
+  const sd = Math.hypot(x, z) > 86 ? 99 : shoreDist(x, z)
+  if (sd < 0.6 || height(x, z) < 0.08) return 0
+  if (onJetty(x, z)) return 0
+  const forest = Math.hypot(x - FOREST_POS.x, z - FOREST_POS.z) > FOREST_POS.r + 20 ? 0 : forestAmount(x, z)
+  const mods = (0.08 + 0.92 * smoothstep(2.2, 4.4, pathDist(x, z))) * (1 - 0.8 * forest)
+  const meadow = 1 - smoothstep(46, 88, Math.hypot(x - 75, z - 60))
+  const shore = smoothstep(0.6, 2.5, sd) * (1 - smoothstep(7, 17, sd))
+  const wM = Math.max(meadow, shore * 0.75)
+  if (wM > 0) {
+    out[0] = wM * (0.2 + 0.8 * smoothstep(0.48, 0.66, fbm2(x * 0.06 + 31, z * 0.06 + 7, 3)))
+    out[1] = wM * (0.25 + 0.75 * smoothstep(0.45, 0.63, fbm2(x * 0.075 + 71, z * 0.075 + 53, 3)))
+  }
+  const hill = 1 - smoothstep(52, 94, Math.hypot(x + 112, z + 74))
+  if (hill > 0) {
+    out[2] = hill * (0.25 + 0.75 * smoothstep(0.48, 0.65, fbm2(x * 0.065 + 13, z * 0.065 + 91, 3)))
+    out[3] = hill * (0.18 + 0.7 * smoothstep(0.5, 0.66, fbm2(x * 0.08 + 57, z * 0.08 + 23, 3)))
+    out[4] = hill * (0.25 + 0.75 * smoothstep(0.48, 0.64, fbm2(x * 0.07 + 83, z * 0.07 + 37, 3)))
+  }
+  out[1] += 0.08
+  out[4] += 0.08
+  let s = 0
+  for (let k = 0; k < 5; k++) {
+    out[k] *= mods
+    s += out[k]
+  }
+  return s
+}
+
+function addFlower(b: Builder, x: number, z: number, kind: number): void {
+  const y = height(x, z)
+  const tall = valueNoise2(x * 0.035 + 40.5, z * 0.035 + 17.3)
+  const up = 0.8 + 0.3 * tall
+  const spec = FLOWER_HEAD[kind]
+  const H = (spec.h0 + (spec.h1 - spec.h0) * hash(x + 2, z)) * up
+  const width = spec.d0 + (spec.d1 - spec.d0) * hash(z, x + 3)
+  if (kind === 3) {
+    b.flowerStem(x, y, z, H, kind)
+    b.blossom(x, y, z, width * 0.55 * 0.5, H * 0.97, kind)
+    b.blossom(x, y, z, width * 0.74 * 0.5, H * 0.85, kind)
+    b.blossom(x, y, z, width * 0.9 * 0.5, H * 0.72, kind)
+    b.blossom(x, y, z, width * 0.5, H * 0.58, kind)
     return
   }
-  addPrism(b, tree.x, y, tree.z, 0.18 * s, tree.x, y + 1.0 * s, tree.z, 0.1 * s, BARK)
-  for (let i = 0; i < 10; i++) {
-    const yaw = (i / 10) * Math.PI * 2
-    const lift = 0.7 + (i % 3) * 0.22
-    addLeafCard(b, tree.x + Math.cos(yaw) * 0.2 * s, y + lift * s, tree.z + Math.sin(yaw) * 0.2 * s, yaw, 0.55 * s, 0.95 * s, 0.35 * s)
-  }
+  b.flowerStem(x, y, z, H, kind)
+  b.blossom(x, y, z, width * 0.5, H, kind)
 }
 
-function grassBlade(b: Builder, x: number, z: number): void {
-  const y = height(x, z)
-  const yaw0 = hash(x, z) * Math.PI
-  const k = 0.92 + hash(x + 1, z + 1) * 0.16
-  const bottom: RGB = [LEAF_BOTTOM[0] * k, LEAF_BOTTOM[1] * k, LEAF_BOTTOM[2] * k]
-  const top: RGB = [LEAF_TOP[0] * k, LEAF_TOP[1] * k, LEAF_TOP[2] * k]
-  const tall = 0.7
-  const w = 0.18
-  const card = (yaw: number, ox: number, oz: number) => {
-    const c = Math.cos(yaw), s = Math.sin(yaw)
-    const px = x + ox, pz = z + oz
-    for (let r = 0; r < 3; r++) {
-      const t0 = r / 3
-      const t1 = (r + 1) / 3
-      const lean0 = t0 * t0 * 0.12
-      const lean1 = t1 * t1 * 0.12
-      const w0 = w * (1 - t0 * 0.35)
-      const w1 = w * (1 - t1 * 0.35)
-      const y0 = y + tall * t0
-      const y1 = y + tall * t1
-      const c0 = t0 < 0.45 ? bottom : top
-      const c1 = t1 < 0.45 ? bottom : top
-      b.card(
-        px - c * w0 + s * lean0, y0, pz - s * w0 - c * lean0,
-        px + c * w0 + s * lean0, y0, pz + s * w0 - c * lean0,
-        px + c * w1 + s * lean1, y1, pz + s * w1 - c * lean1,
-        px - c * w1 + s * lean1, y1, pz - s * w1 - c * lean1,
-        c0, c0, c1, c1, KIND_GRASS,
-      )
+function flowerMeshes(): MeshData[] {
+  const bag = new Bag(false, true)
+  const step = 2.15
+  const extent = 230
+  const n = Math.floor((extent * 2) / step)
+  const weights = [0, 0, 0, 0, 0]
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const x = -extent + (i + 0.5) * step
+      const z = -extent + (j + 0.5) * step
+      const sum = flowerWeights(x, z, weights)
+      if (sum < 0.16 || hash(x + 19, z + 4) > Math.min(0.46, sum * 0.34)) continue
+      let pick = hash(x + 1, z + 9) * sum
+      let kind = 0
+      for (let k = 0; k < 5; k++) {
+        pick -= weights[k]
+        if (pick <= 0) { kind = k; break }
+      }
+      addFlower(bag.room(kind === 3 ? 126 : 36), x + (hash(x, z + 5) - 0.5) * 0.8, z + (hash(z, x + 5) - 0.5) * 0.8, kind)
     }
   }
-  card(yaw0, 0.04, 0.03)
-  card(yaw0 + 2.1, -0.04, 0.04)
-  card(yaw0 + 4.0, 0.02, -0.05)
+  return bag.finish()
 }
 
-function addRock(b: Builder, x: number, z: number, scale: number): void {
-  const y = height(x, z) - 0.08 * scale
-  const sides = 5
-  const rad = scale * (0.55 + hash(x + 1, z) * 0.35)
-  const top = scale * (0.65 + hash(x, z + 1) * 0.55)
-  const color = shade(ROCK, x, z)
-  const refY = y + top * 0.4
-  for (let i = 0; i < sides; i++) {
-    const a0 = (i / sides) * Math.PI * 2 + hash(x, z)
-    const a1 = ((i + 1) / sides) * Math.PI * 2 + hash(x, z)
-    const c0 = Math.cos(a0), s0 = Math.sin(a0)
-    const c1 = Math.cos(a1), s1 = Math.sin(a1)
-    b.quad(
-      x + c0 * rad, y, z + s0 * rad,
-      x + c1 * rad, y, z + s1 * rad,
-      x + c1 * rad * 0.35, y + top, z + s1 * rad * 0.35,
-      x + c0 * rad * 0.35, y + top, z + s0 * rad * 0.35,
-      color, KIND_PROP, x, refY, z,
-    )
-  }
+/** East-shore walk, stopped halfway across the pond. No boarding platform. */
+const JETTY = { x0: 66.2, x1: 38.4, z: 8, y: 0.62 }
+
+function onJetty(x: number, z: number): boolean {
+  return x < JETTY.x0 + 1.5 && x > JETTY.x1 - 1 && z > JETTY.z - 1.8 && z < JETTY.z + 1.8
 }
 
-const CLOUD_UV = [[0, 0], [1, 0], [1, 1], [0, 1]] as const
-
-/** One painted cumulus card. UVs drive the puff cut-out in the cloud shader. */
-function cloudCard(
+function addAabb(
   b: Builder,
-  x: number, y: number, z: number,
-  yaw: number, w: number, h: number, lift: number,
+  cx: number, cy: number, cz: number,
+  hx: number, hy: number, hz: number,
+  color: RGB,
 ): void {
-  const c = Math.cos(yaw), s = Math.sin(yaw)
-  b.card(
-    x - c * w, y, z - s * w,
-    x + c * w, y, z + s * w,
-    x + c * w * 0.78 + s * lift, y + h, z + s * w * 0.78 - c * lift,
-    x - c * w * 0.78 + s * lift, y + h, z - s * w * 0.78 - c * lift,
-    CLOUD, CLOUD, CLOUD, CLOUD, KIND_CLOUD, CLOUD_UV,
-  )
+  const x0 = cx - hx, x1 = cx + hx
+  const y0 = cy, y1 = cy + hy
+  const z0 = cz - hz, z1 = cz + hz
+  const quad = (
+    ax: number, ay: number, az: number,
+    bx: number, by: number, bz: number,
+    cx2: number, cy2: number, cz2: number,
+    dx: number, dy: number, dz: number,
+  ) => b.quad(ax, ay, az, bx, by, bz, cx2, cy2, cz2, dx, dy, dz, color, KIND_PROP, cx, cy + hy * 0.5, cz)
+  quad(x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0)
+  quad(x1, y0, z1, x0, y0, z1, x0, y1, z1, x1, y1, z1)
+  quad(x0, y0, z1, x0, y0, z0, x0, y1, z0, x0, y1, z1)
+  quad(x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0)
+  quad(x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1)
+  quad(x0, y0, z1, x1, y0, z1, x1, y0, z0, x0, y0, z0)
 }
 
-function cloudMesh(): MeshData {
+function addBeam(
+  b: Builder,
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  w: number, h: number,
+  color: RGB,
+): void {
+  let dx = bx - ax, dy = by - ay, dz = bz - az
+  const len = Math.hypot(dx, dy, dz) || 1
+  dx /= len; dy /= len; dz /= len
+  let hx = 0, hy = 1, hz = 0
+  if (Math.abs(dy) > 0.92) { hx = 1; hy = 0; hz = 0 }
+  let sx = hy * dz - hz * dy
+  let sy = hz * dx - hx * dz
+  let sz = hx * dy - hy * dx
+  const sl = Math.hypot(sx, sy, sz) || 1
+  sx /= sl; sy /= sl; sz /= sl
+  const vx = dy * sz - dz * sy
+  const vy = dz * sx - dx * sz
+  const vz = dx * sy - dy * sx
+  const hw = w * 0.5
+  const hh = h * 0.5
+  const p = (t: number, su: number, vu: number): [number, number, number] => [
+    ax + dx * len * t + sx * su + vx * vu,
+    ay + dy * len * t + sy * su + vy * vu,
+    az + dz * len * t + sz * su + vz * vu,
+  ]
+  const c = [
+    p(0, -hw, -hh), p(0, hw, -hh), p(0, hw, hh), p(0, -hw, hh),
+    p(1, -hw, -hh), p(1, hw, -hh), p(1, hw, hh), p(1, -hw, hh),
+  ]
+  const mx = (ax + bx) * 0.5
+  const my = (ay + by) * 0.5
+  const mz = (az + bz) * 0.5
+  const faces: Array<[number, number, number, number]> = [
+    [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7], [3, 2, 6, 7], [0, 4, 5, 1],
+  ]
+  for (const f of faces) {
+    const a = c[f[0]], d = c[f[1]], e = c[f[2]], g = c[f[3]]
+    b.quad(a[0], a[1], a[2], d[0], d[1], d[2], e[0], e[1], e[2], g[0], g[1], g[2], color, KIND_PROP, mx, my, mz)
+  }
+}
+
+function jettyMesh(): MeshData {
   const b = new Builder()
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * Math.PI * 2 + 0.4
-    const rad = 34 + (i % 3) * 6
-    const x = Math.cos(a) * rad
-    const z = Math.sin(a) * rad * 0.72
-    const y = 20 + (i % 3) * 2.5
-    const puff = 3 + (i % 2)
-    for (let k = 0; k < puff; k++) {
-      const yaw = a + k * 0.9
-      const ox = Math.cos(yaw) * (k - 1) * 3.2
-      const oz = Math.sin(yaw) * (k - 1) * 2.4
-      const w = 12.0 + (k % 2) * 3.5
-      const h = 4.6 + (k % 3) * 0.9
-      cloudCard(b, x + ox, y + k * 0.6, z + oz, yaw, w, h, 0.4)
-      if (k === 1) cloudCard(b, x + ox, y + 1.2, z + oz, yaw + 1.2, w * 0.72, h * 0.85, 0.2)
+  const { x0, x1, z, y } = JETTY
+  const postC: RGB = [0.36, 0.27, 0.21]
+  for (let x = x0; x > x1 + 0.4; x -= 0.95) {
+    const r = hash(x, z + 1)
+    if (r < 0.06) continue
+    let len = 2.32 + (hash(x, z + 2) - 0.5) * 0.16
+    let off = (hash(x, z + 3) - 0.5) * 0.1
+    if (r > 0.92) {
+      len = 1.05
+      off = (hash(x, z + 4) < 0.5 ? -1 : 1) * 0.55
     }
+    const tone = mul(mix(WOOD_GREY, [0.42, 0.33, 0.27], hash(x, z)), 0.9 + hash(x + 4, z) * 0.18)
+    addAabb(b, x - 0.4, y - 0.06 + (hash(x, z + 5) - 0.5) * 0.03, z + off, 0.38, 0.11, len * 0.5, tone)
   }
-  return b.finish(false, true)
-}
-
-function rainMesh(scene: SceneKind): MeshData {
-  const b = new Builder()
-  const spawn = SCENE_SPAWN[scene]
-  const tint: RGB = [0.9, 0.92, 0.95]
-  const baseY = height(0, 0) + 8
-  for (let i = 0; i < 24; i++) {
-    const x = spawn.x + (i % 6) * 2 - 5
-    const z = spawn.z + Math.floor(i / 6) * 2 - 3
-    const y = baseY + (i % 3)
-    b.card(x, y, z, x + 0.05, y, z, x + 0.05, y - 0.8, z + 0.2, x, y - 0.8, z + 0.2, tint, tint, tint, tint, KIND_RAIN)
+  for (const sz of [-0.82, 0.82]) {
+    addAabb(b, (x0 + x1) * 0.5, y - 0.2, z + sz, (x0 - x1) * 0.47, 0.08, 0.08, postC)
   }
-  return b.finish(false, true)
-}
-
-/** Drape a CustomSRP river centerline onto BoluoMini terrain height. */
-function addRiverPath(b: Builder, path: RiverPath, ox: number, oz: number): number {
-  const pts = path.center
-  if (pts.length < 2) return 0
-  let segs = 0
-  for (let i = 0; i < pts.length - 1; i++) {
-    const ax = pts[i][0] - ox, az = pts[i][2] - oz
-    const bx = pts[i + 1][0] - ox, bz = pts[i + 1][2] - oz
-    // Skip segments fully outside the window.
-    if (Math.hypot(ax, az) > WINDOW_R + 20 && Math.hypot(bx, bz) > WINDOW_R + 20) continue
-    const dx = bx - ax, dz = bz - az
-    const len = Math.hypot(dx, dz) || 1
-    const px = -dz / len, pz = dx / len
-    const w0 = (path.width[i] ?? 8) * 0.5
-    const w1 = (path.width[i + 1] ?? w0 * 2) * 0.5
-    const y0 = height(ax, az) + 0.22
-    const y1 = height(bx, bz) + 0.22
-    b.quad(
-      ax + px * w0, y0, az + pz * w0,
-      ax - px * w0, y0, az - pz * w0,
-      bx - px * w1, y1, bz - pz * w1,
-      bx + px * w1, y1, bz + pz * w1,
-      WATER, KIND_WATER, (ax + bx) * 0.5, (y0 + y1) * 0.5, (az + bz) * 0.5,
-    )
-    segs++
+  const posts: number[] = []
+  for (let x = 64; x > x1; x -= 7) posts.push(x)
+  posts.push(x1 + 0.6)
+  for (const x of posts) {
+    for (const sz of [-1.12, 1.12]) {
+      const lean = Math.sign(sz) * 0.12
+      const foot = Math.min(-1.45, height(x, z + sz) - 0.3)
+      addBeam(b, x, foot, z + sz, x + lean, y - 0.1, z + sz + lean, 0.13, 0.12, postC)
+    }
+    addAabb(b, x, y - 0.24, z, 0.11, 0.14, 1.2, postC)
   }
-  return segs
+  return b.finish(true, false)
 }
 
-/** CustomSRP waterfall sheet / splash / mist — real size & yaw; vertical span from terrain. */
-function addFallsSpec(b: Builder, spec: FallsSpec, ox: number, oz: number): void {
-  const x = spec.x - ox
-  const z = spec.z - oz
-  if (Math.hypot(x, z) > WINDOW_R + 25) return
-  const ground = height(x, z)
-  // Keep CustomSRP height proportions, but anchor bottom to local terrain.
-  const top = ground + Math.max(6, spec.tall * 0.45)
-  const bot = ground + spec.base
-  const yaw = spec.yaw
-  const c = Math.cos(yaw), s = Math.sin(yaw)
-  const hw = spec.halfW
-  const mist: RGB = [0.72, 0.86, 0.94]
-  b.card(
-    x - c * hw, top, z - s * hw,
-    x + c * hw, top, z + s * hw,
-    x + c * hw * 0.92, bot, z + s * hw * 0.92,
-    x - c * hw * 0.92, bot, z - s * hw * 0.92,
-    mist, mist, FOAM, FOAM, KIND_FALLS,
-  )
-  const sx = -s * Math.min(2.5, hw * 0.25), sz = c * Math.min(2.5, hw * 0.25)
-  b.card(
-    x - c * hw * 0.4 + sx, top, z - s * hw * 0.4 + sz,
-    x + c * hw * 0.4 + sx, top, z + s * hw * 0.4 + sz,
-    x + c * hw * 0.35 + sx, bot, z + s * hw * 0.35 + sz,
-    x - c * hw * 0.35 + sx, bot, z - s * hw * 0.35 + sz,
-    mist, mist, FOAM, FOAM, KIND_FALLS,
-  )
-  b.card(
-    x - hw * 0.4, bot, z,
-    x + hw * 0.4, bot, z,
-    x + hw * 0.3, bot + Math.min(2.2, spec.tall * 0.08), z - s * 0.6,
-    x - hw * 0.3, bot + Math.min(2.2, spec.tall * 0.08), z - s * 0.6,
-    FOAM, FOAM, FOAM, FOAM, KIND_CLOUD,
-  )
-}
+const WOOD_GREY: RGB = [0.545, 0.49, 0.42]
 
-function buildInlandWater(ox: number, oz: number): { river: MeshData; falls: MeshData } {
-  const riverB = new Builder()
-  const fallsB = new Builder()
-  for (const path of RIVER_PATHS) addRiverPath(riverB, path, ox, oz)
-  for (const spec of FALLS_SPECS) addFallsSpec(fallsB, spec, ox, oz)
-  const river = riverB.empty ? emptyMesh() : riverB.finish(false, true)
-  river.reflect = false
-  return {
-    river,
-    falls: fallsB.empty ? emptyMesh() : fallsB.finish(false, true),
+function rng(seed: number): () => number {
+  let s = seed >>> 0 || 1
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0
+    let t = s
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
 }
 
-function placeItem(
-  trees: Spot[],
-  props: Builder,
-  rocks: Builder,
-  grass: Builder,
-  it: LayoutItem,
-): void {
-  // Rivers / falls come from CustomSRP mesh paths (water.gen), not MapItem points.
-  if (it.k === 'river' || it.k === 'falls' || it.k === 'water' || it.k === 'lake' || it.k === 'fx') return
-  const loc = toLocal(it.x, it.z)
-  const x = loc.x
-  const z = loc.z
-  if (Math.hypot(x, z) > WINDOW_R + 6) return
-  const yaw = it.yaw
-  const s = Math.max(0.35, Math.min(it.s, 4))
-  switch (it.k) {
-    case 'pine':
-    case 'leaf':
-    case 'palm':
-    case 'bush':
-      trees.push({ x, z, scale: s * (it.k === 'bush' ? 0.9 : 0.75), kind: it.k, yaw })
-      break
-    case 'grass':
-      grassBlade(grass, x, z)
-      break
-    case 'flower':
-      addFlower(props, x, z, s)
-      break
-    case 'dead':
-      addDeadTree(props, x, z, s)
-      break
-    case 'rock':
-      addRock(rocks, x, z, 0.55 * s)
-      break
-    case 'cliff':
-      addCliff(props, x, z, yaw, Math.min(s, 1.6))
-      break
-    case 'campfire':
-      addCampfire(props, x, z, Math.min(s, 1.2))
-      break
-    case 'pineapple':
-      break
-    case 'farmhouse':
-      addFarmhouse(props, x, z, yaw, Math.min(s, 1.4))
-      break
-    case 'shed':
-      addShed(props, x, z, yaw, Math.min(s, 1.3))
-      break
-    case 'tent':
-      addTent(props, x, z, Math.min(s, 1.2))
-      break
-    case 'dock':
-      addDock(props, x, z, yaw, Math.min(s, 1.5))
-      break
-    case 'bridge':
-      addBridge(props, x, z, yaw, Math.max(1.1, Math.min(s, 1.8)))
-      break
-    case 'mountain':
-      addMountain(props, x, z, Math.min(s, 2))
-      break
-    case 'barrel':
-      addBarrel(props, x, z, s)
-      break
-    case 'crate':
-      addCrate(props, x, z, s)
-      break
-    case 'bench':
-      addBench(props, x, z, yaw, s)
-      break
-    case 'wagon':
-      addWagon(props, x, z, yaw, s)
-      break
-    case 'fence':
-      addFence(props, x, z, yaw, s)
-      break
-    case 'canoe':
-      addCanoe(props, x, z, yaw, s)
-      break
-    default:
-      break
-  }
+const BEECH = 0
+const BIRCH = 1
+const OAK = 2
+
+function nrm(x: number, y: number, z: number): [number, number, number] {
+  const l = Math.hypot(x, y, z)
+  if (l < 1e-5) return [0, 1, 0]
+  return [x / l, y / l, z / l]
 }
 
-function windowItems(scene: SceneKind): LayoutItem[] {
-  const layout = PRESET_LAYOUTS.find((p) => p.id === scene) ?? PRESET_LAYOUTS[0]
-  return layout.items.map((i) => ITEMS[i]).filter(Boolean)
-}
-
-/** Distance from a point to a polyline, measured to the water edge (centerline minus half width). */
-function shellToPath(wx: number, wz: number, path: RiverPath): number {
-  const center = path.center
-  const width = path.width
-  let best = Infinity
-  for (let i = 0; i < center.length - 1; i++) {
-    const ax = center[i][0]
-    const az = center[i][2]
-    const bx = center[i + 1][0]
-    const bz = center[i + 1][2]
-    const abx = bx - ax
-    const abz = bz - az
-    const len2 = abx * abx + abz * abz
-    let t = 0
-    if (len2 > 1e-6) t = Math.max(0, Math.min(1, ((wx - ax) * abx + (wz - az) * abz) / len2))
-    const d = Math.hypot(wx - (ax + abx * t), wz - (az + abz * t))
-    const half = ((width[i] ?? 8) * (1 - t) + (width[i + 1] ?? width[i] ?? 8) * t) * 0.5
-    best = Math.min(best, Math.max(0, d - half))
-  }
-  return best
+function cross(
+  a: [number, number, number],
+  b: [number, number, number],
+): [number, number, number] {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ]
 }
 
 /**
- * Sea cells that touch land, in local meters. Same idea as CustomSRP's live shoreline:
- * flood the open water in from the sample border, then keep the land edge.
+ * Bark strokes on a tube. Each one runs along the grain.
+ * Birch sits on the centre of the trunk, so the stroke is only a little wider than the wood.
+ * alongOf and acrossOf are full sizes in metres.
  */
-function shorePoints(ox: number, oz: number): Array<{ x: number; z: number }> {
-  const reach = 150
-  const step = 8
-  const n = Math.ceil((reach * 2) / step)
-  const landY = 5.7 + 0.4
-  const land = new Uint8Array(n * n)
-  for (let ix = 0; ix < n; ix++) {
-    const wx = ox - reach + (ix + 0.5) * step
-    for (let iz = 0; iz < n; iz++) {
-      const wz = oz - reach + (iz + 0.5) * step
-      if (heightWorld(wx, wz) > landY) land[ix * n + iz] = 1
-    }
+function coatTube(
+  b: Builder,
+  pts: Array<[number, number, number]>,
+  radii: number[],
+  species: number,
+  rand: () => number,
+  marks: number,
+  alongOf: (r: number) => number,
+  acrossOf: (r: number) => number,
+  bands: boolean,
+): void {
+  if (pts.length < 2 || marks < 1) return
+  const span = pts.length - 1
+  for (let n = 0; n < marks; n++) {
+    const u = Math.pow(rand(), bands ? 1.05 : species === BIRCH ? 1 : 1.25) * 0.98
+    const f = u * span
+    const i = Math.min(span - 1, Math.floor(f))
+    const t = f - i
+    const p0 = pts[i]
+    const p1 = pts[i + 1]
+    const c: [number, number, number] = [
+      p0[0] + (p1[0] - p0[0]) * t,
+      p0[1] + (p1[1] - p0[1]) * t,
+      p0[2] + (p1[2] - p0[2]) * t,
+    ]
+    const r = radii[i] + (radii[Math.min(i + 1, radii.length - 1)] - radii[i]) * t
+    const axis = nrm(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+    const ax = Math.abs(axis[1]) < 0.9 ? 0 : 1
+    const ay = Math.abs(axis[1]) < 0.9 ? 1 : 0
+    const ref = nrm(ax, ay, 0.15)
+    const dot = ref[0] * axis[0] + ref[1] * axis[1] + ref[2] * axis[2]
+    const side = nrm(ref[0] - axis[0] * dot, ref[1] - axis[1] * dot, ref[2] - axis[2] * dot)
+    const bin = nrm(...cross(axis, side))
+    const ang = rand() * Math.PI * 2
+    const ca = Math.cos(ang)
+    const sa = Math.sin(ang)
+    const radial = nrm(
+      side[0] * ca + bin[0] * sa,
+      side[1] * ca + bin[1] * sa,
+      side[2] * ca + bin[2] * sa,
+    )
+    let dir = bands ? nrm(...cross(axis, radial)) : axis
+    const spin = (rand() - 0.5) * (bands ? 0.5 : species === BIRCH ? 0.06 : 0.28)
+    const cs = Math.cos(spin)
+    const sn = Math.sin(spin)
+    const bent = cross(radial, dir)
+    dir = nrm(dir[0] * cs + bent[0] * sn, dir[1] * cs + bent[1] * sn, dir[2] * cs + bent[2] * sn)
+    const skin = species === BIRCH ? 0.012 : r
+    b.barkDab(
+      c[0] + radial[0] * skin,
+      c[1] + radial[1] * skin,
+      c[2] + radial[2] * skin,
+      radial[0], radial[1], radial[2],
+      dir[0], dir[1], dir[2],
+      acrossOf(r) * 0.5,
+      alongOf(r) * 0.5,
+      species,
+    )
   }
-  const sea = new Uint8Array(n * n)
-  const queue: number[] = []
-  for (let ix = 0; ix < n; ix++) {
-    for (let iz = 0; iz < n; iz++) {
-      if (ix !== 0 && iz !== 0 && ix !== n - 1 && iz !== n - 1) continue
-      const id = ix * n + iz
-      if (land[id] || sea[id]) continue
-      sea[id] = 1
-      queue.push(id)
-    }
-  }
-  for (let q = 0; q < queue.length; q++) {
-    const id = queue[q]
-    const ix = Math.floor(id / n)
-    const iz = id - ix * n
-    const push = (x: number, z: number) => {
-      if (x < 0 || z < 0 || x >= n || z >= n) return
-      const next = x * n + z
-      if (land[next] || sea[next]) return
-      sea[next] = 1
-      queue.push(next)
-    }
-    push(ix - 1, iz)
-    push(ix + 1, iz)
-    push(ix, iz - 1)
-    push(ix, iz + 1)
-  }
-  const pts: Array<{ x: number; z: number }> = []
-  for (let ix = 0; ix < n; ix++) {
-    for (let iz = 0; iz < n; iz++) {
-      if (!sea[ix * n + iz]) continue
-      const edge = (ix > 0 && land[(ix - 1) * n + iz])
-        || (ix + 1 < n && land[(ix + 1) * n + iz])
-        || (iz > 0 && land[ix * n + iz - 1])
-        || (iz + 1 < n && land[ix * n + iz + 1])
-      if (!edge) continue
-      pts.push({ x: -reach + (ix + 0.5) * step, z: -reach + (iz + 0.5) * step })
-    }
-  }
-  return pts
 }
 
-function nearestShore(pts: Array<{ x: number; z: number }>, x: number, z: number): number {
-  let best = Infinity
-  let bi = -1
+/** Tapered pipe. The frame is carried along it so the tube does not twist. */
+function addTube(
+  b: Builder,
+  pts: Array<[number, number, number]>,
+  radii: number[],
+  sides: number,
+  color: RGB,
+): void {
+  let ref = nrm(1, 0, 0.3)
+  const rings: number[][] = []
   for (let i = 0; i < pts.length; i++) {
-    const d = Math.hypot(x - pts[i].x, z - pts[i].z)
-    if (d < best) {
-      best = d
-      bi = i
+    const i0 = Math.max(i - 1, 0)
+    const i1 = Math.min(i + 1, pts.length - 1)
+    let tx = pts[i1][0] - pts[i0][0]
+    let ty = pts[i1][1] - pts[i0][1]
+    let tz = pts[i1][2] - pts[i0][2]
+    const tl = Math.hypot(tx, ty, tz) || 1
+    tx /= tl; ty /= tl; tz /= tl
+    const dot = ref[0] * tx + ref[1] * ty + ref[2] * tz
+    let nx = ref[0] - tx * dot
+    let ny = ref[1] - ty * dot
+    let nz = ref[2] - tz * dot
+    let nl = Math.hypot(nx, ny, nz)
+    if (nl < 1e-5) {
+      const ax = Math.abs(ty) < 0.9 ? 0 : 1
+      const ay = Math.abs(ty) < 0.9 ? 1 : 0
+      const ad = ax * tx + ay * ty
+      nx = ax - tx * ad
+      ny = ay - ty * ad
+      nz = -tz * ad
+      nl = Math.hypot(nx, ny, nz) || 1
+    }
+    nx /= nl; ny /= nl; nz /= nl
+    ref = [nx, ny, nz]
+    const bx = ty * nz - tz * ny
+    const by = tz * nx - tx * nz
+    const bz = tx * ny - ty * nx
+    const ids: number[] = []
+    const rad = radii[i]
+    for (let s = 0; s < sides; s++) {
+      const a = (s / sides) * Math.PI * 2
+      const c = Math.cos(a)
+      const sn = Math.sin(a)
+      const nnx = nx * c + bx * sn
+      const nny = ny * c + by * sn
+      const nnz = nz * c + bz * sn
+      ids.push(b.vertex(
+        pts[i][0] + nnx * rad, pts[i][1] + nny * rad, pts[i][2] + nnz * rad,
+        nnx, nny, nnz, color, KIND_PROP,
+      ))
+    }
+    rings.push(ids)
+  }
+  for (let i = 0; i < pts.length - 1; i++) {
+    for (let s = 0; s < sides; s++) {
+      const s1 = (s + 1) % sides
+      b.tri(rings[i][s], rings[i][s1], rings[i + 1][s])
+      b.tri(rings[i][s1], rings[i + 1][s1], rings[i + 1][s])
     }
   }
-  if (bi < 0) return Infinity
-  const a = pts[bi]
-  for (let i = 0; i < pts.length; i++) {
-    if (i === bi) continue
-    const b = pts[i]
-    if (Math.hypot(a.x - b.x, a.z - b.z) > 12) continue
-    const abx = b.x - a.x
-    const abz = b.z - a.z
-    const len2 = abx * abx + abz * abz
-    let t = 0
-    if (len2 > 1e-6) t = Math.max(0, Math.min(1, ((x - a.x) * abx + (z - a.z) * abz) / len2))
-    best = Math.min(best, Math.hypot(x - (a.x + abx * t), z - (a.z + abz * t)))
+}
+
+function bezier(
+  p0: [number, number, number],
+  p1: [number, number, number],
+  p2: [number, number, number],
+  u: number,
+): [number, number, number] {
+  const w = 1 - u
+  return [
+    p0[0] * w * w + p1[0] * 2 * w * u + p2[0] * u * u,
+    p0[1] * w * w + p1[1] * 2 * w * u + p2[1] * u * u,
+    p0[2] * w * w + p1[2] * 2 * w * u + p2[2] * u * u,
+  ]
+}
+
+function crownColor(up: number, roll: number, family: number): RGB {
+  const palette = [LEAF_MID, LEAF_LIGHT, LEAF_DARK, LEAF_HI]
+  let c = palette[family] ?? LEAF_MID
+  if (roll < 0.14) c = palette[(family + 1 + Math.floor(roll * 17)) % 4]
+  if (up > 0.5) c = mix(c, LEAF_HI, 0.62)
+  else if (up < 0.05) c = mix(c, LEAF_DARK, 0.5)
+  return c
+}
+
+/** One lobe of the autumn crown: strokes on the shell, and two dark touches inside. */
+function addLobe(
+  b: Builder,
+  lx: number, ly: number, lz: number, lr: number,
+  crown: [number, number, number],
+  family: number,
+  rand: () => number,
+  dabs: number,
+): void {
+  const away = nrm(lx - crown[0], ly - crown[1], lz - crown[2])
+  for (let n = 0; n < dabs; n++) {
+    const raw = nrm(rand() - 0.5, rand() - 0.5, rand() - 0.5)
+    const d = nrm(raw[0] + away[0] * 0.5, raw[1] + away[1] * 0.5 + 0.15, raw[2] + away[2] * 0.5)
+    const reach = lr * (0.72 + rand() * 0.4)
+    const px = lx + d[0] * reach
+    const py = ly + d[1] * reach
+    const pz = lz + d[2] * reach
+    const radial = nrm(px - crown[0], py - crown[1], pz - crown[2])
+    const normal = nrm(
+      d[0] * 0.6 + radial[0] * 0.55,
+      d[1] * 0.6 + radial[1] * 0.55,
+      d[2] * 0.6 + radial[2] * 0.55,
+    )
+    const size = lr * 0.34 * (1 + rand() * 0.6)
+    const aspect = 1.5 + rand() * 0.5
+    b.dab(px, py, pz, normal[0], normal[1], normal[2], size * 0.5, size * aspect * 0.5, crownColor(normal[1], rand(), family))
   }
-  return best
+  for (let k = 0; k < 2; k++) {
+    const hx = lr * 0.42
+    b.dab(
+      lx + (rand() - 0.5) * lr * 0.5,
+      ly - lr * 0.15 * k,
+      lz + (rand() - 0.5) * lr * 0.5,
+      0, -1, 0, hx, hx * 1.2, LEAF_DARK,
+    )
+  }
+}
+
+/**
+ * Autumn-wood tree, kept in this meadow's greens and bark.
+ * The trunk is a dark tube with strokes along the grain. Limbs curl out.
+ * The crown is lobes of long brush dabs.
+ * `scale` is the old size knob: 1 is a full beech, a bush is the low understorey.
+ */
+function addTree(b: Builder, x: number, z: number, scale: number, bush = false): void {
+  const y = height(x, z)
+  const rand = rng((Math.floor(hash(x, z) * 1e9) ^ Math.floor(hash(z + 3, x) * 1e9)) >>> 0 || 1)
+  if (bush) {
+    const tall = (1.15 + rand() * rand() * 2.4) * scale
+    const family = rand() < 0.4 ? 2 : rand() < 0.7 ? 0 : 1
+    const n = 3 + Math.floor(rand() * 3)
+    for (let i = 0; i < n; i++) {
+      const lx = x + (rand() - 0.5) * tall * 0.9
+      const ly = y + tall * (0.45 + rand() * 0.55)
+      const lz = z + (rand() - 0.5) * tall * 0.9
+      const lr = (0.38 + rand() * 0.42) * scale
+      const dir = nrm(lx - x, ly - y, lz - z)
+      const stem: Array<[number, number, number]> = [
+        [x, y, z],
+        [x + dir[0] * tall * 0.55, y + tall * 0.55, z + dir[2] * tall * 0.55],
+      ]
+      const stemR = [0.03 * scale, 0.015 * scale]
+      addTube(b, stem, stemR, 4, BARK_UNDER)
+      coatTube(b, stem, stemR, 0, rand, 3, () => tall * 0.62, () => 0.05 * scale, false)
+      addLobe(b, lx, ly, lz, lr, [x, y + tall * 0.4, z], family, rand, 8)
+    }
+    return
+  }
+  const stand = hash(x * 0.21, z * 0.17)
+  const type = scale > 1.25 ? OAK : stand > 0.72 ? BIRCH : stand > 0.56 ? OAK : BEECH
+  const k = 0.5 * scale
+  const r0 = (type === BIRCH ? 0.13 + rand() * 0.08 : type === OAK ? 0.62 + rand() * 0.25 : 0.28 + rand() * rand() * 0.4) * k
+  const h = (type === BIRCH ? 16 + rand() * 5 : type === OAK ? 18 + rand() * 4 : 22 + rand() * 6) * k
+  const family = type === BIRCH ? 1 : type === OAK ? 0 : rand() < 0.55 ? 0 : 2
+  const lean: [number, number] = [(rand() - 0.5) * 0.09, (rand() - 0.5) * 0.09]
+  const seed = rand() * 6
+  const rings = 7
+  const top = h * (type === BIRCH ? 0.95 : 0.8)
+  const pts: Array<[number, number, number]> = []
+  const radii: number[] = []
+  for (let i = 0; i < rings; i++) {
+    const u = i / (rings - 1)
+    const yy = u * u * 0.4 + u * 0.6
+    const bend = Math.sin(u * 2.4 + seed) * 0.25 * (type === BIRCH ? 1.6 : 1)
+    pts.push([
+      x + lean[0] * yy * top + bend * lean[1] * 8 * k,
+      y - 0.3 * k + yy * (top + 0.3 * k),
+      z + lean[1] * yy * top - bend * lean[0] * 8 * k,
+    ])
+    radii.push(r0 * (1 - 0.6 * yy) * (1 + 0.5 * Math.exp(-(yy * top) / (0.35 * k + r0 * 0.6))))
+  }
+  addTube(b, pts, radii, 6, type === BIRCH ? BIRCH_WHITE : BARK_UNDER)
+  coatTube(
+    b, pts, radii, type, rand,
+    type === BIRCH ? 64 : Math.round(40 + radii[0] * 70),
+    (r) => type === BIRCH ? 0.7 + rand() * 0.6 : 1.2 + rand() * 1.8,
+    (r) => type === BIRCH ? r * 4.2 : Math.min(0.46, Math.max(0.12, r * 0.9)),
+    false,
+  )
+  const trunkAt = (hgt: number): { p: [number, number, number]; r: number } => {
+    let i = 0
+    while (i < rings - 2 && pts[i + 1][1] - y < hgt) i++
+    const span = pts[i + 1][1] - pts[i][1] || 1
+    const t = Math.max(0, Math.min(1, (hgt - (pts[i][1] - y)) / span))
+    return {
+      p: [
+        pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t,
+        pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t,
+        pts[i][2] + (pts[i + 1][2] - pts[i][2]) * t,
+      ],
+      r: radii[i] + (radii[i + 1] - radii[i]) * t,
+    }
+  }
+  const crown: [number, number, number] = [
+    x + lean[0] * top,
+    y + h * (type === OAK ? 0.7 : 0.8),
+    z + lean[1] * top,
+  ]
+  const spread = (type === OAK ? 7.4 : type === BIRCH ? 2.7 + rand() : 4.2 + rand() * 1.6 + (r0 / k) * 2) * k
+  const limbs = type === BIRCH ? 4 : type === OAK ? 6 : 5
+  const lobes: Array<[number, number, number, number]> = []
+  for (let i = 0; i < limbs; i++) {
+    const a = (i / limbs) * Math.PI * 2 + rand() * 1.2
+    const from = top * (0.48 + 0.42 * (i / limbs))
+    const base = trunkAt(from)
+    const tilt = type === BIRCH ? 0.35 : type === OAK ? 0.7 + rand() * 0.35 : 0.48 + rand() * 0.4
+    const len = (spread / Math.sin(tilt)) * (0.7 + rand() * 0.4) * (1 - 0.35 * (i / limbs))
+    const ox = Math.cos(a)
+    const oz = Math.sin(a)
+    const p0 = base.p
+    const p2: [number, number, number] = [
+      p0[0] + ox * len * Math.sin(tilt),
+      p0[1] + len * Math.cos(tilt),
+      p0[2] + oz * len * Math.sin(tilt),
+    ]
+    const p1: [number, number, number] = [
+      p0[0] + (p2[0] - p0[0]) * 0.45 + ox * len * 0.12,
+      p0[1] + (p2[1] - p0[1]) * 0.45 - len * 0.1,
+      p0[2] + (p2[2] - p0[2]) * 0.45 + oz * len * 0.12,
+    ]
+    const lp: Array<[number, number, number]> = []
+    const lrads: number[] = []
+    for (let s = 0; s <= 4; s++) {
+      const u = s / 4
+      lp.push(bezier(p0, p1, p2, u))
+      lrads.push(Math.max(0.028 * k, base.r * 0.5 * (1 - 0.82 * u)))
+    }
+    addTube(b, lp, lrads, 5, type === BIRCH ? BIRCH_WHITE : BARK_UNDER)
+    coatTube(
+      b, lp, lrads, type, rand, type === OAK ? 8 : 5,
+      () => type === BIRCH ? 0.35 + rand() * 0.4 : 0.75 + rand() * 1.05,
+      (r) => type === BIRCH ? r * 4.2 : Math.max(0.06, r * 2.4),
+      false,
+    )
+    for (const u of type === OAK ? [0.55, 0.78, 1] : [0.72, 1]) {
+      const c = bezier(p0, p1, p2, u)
+      c[0] += (rand() - 0.5) * 1.6 * k
+      c[1] += rand() * 0.9 * k
+      c[2] += (rand() - 0.5) * 1.6 * k
+      lobes.push([c[0], c[1], c[2], (1.25 + rand()) * k + r0 * 0.6])
+    }
+  }
+  for (let i = 0; i < 3; i++) {
+    lobes.push([
+      crown[0] + (rand() - 0.5) * spread * 0.9,
+      y + h * 0.96 + (rand() - 0.5) * 3 * k,
+      crown[2] + (rand() - 0.5) * spread * 0.9,
+      (1.5 + rand() * 0.9) * k,
+    ])
+  }
+  for (const lobe of lobes) addLobe(b, lobe[0], lobe[1], lobe[2], lobe[3], crown, family, rand, 16)
+}
+
+function treeMeshes(): MeshData[] {
+  const bag = new Bag(true, true, 'tree')
+  addTree(bag.room(9000), HILL_POS.x, HILL_POS.z, 1.35)
+  const rand = rng(4021)
+  const trees: Array<[number, number]> = [[72.3, -109.7], [77.6, -112]]
+  const open = (x: number, z: number) => Math.hypot(x - 70, z + 118) < 9.3 || Math.hypot(x - 66.5, z + 111.4) < 8.2
+  for (let i = 0; i < 9000 && trees.length < 72; i++) {
+    const x = FOREST_POS.x + (rand() * 2 - 1) * 90
+    const z = FOREST_POS.z + (rand() * 2 - 1) * 90
+    if (forestAmount(x, z) <= 0.5 || open(x, z) || shoreDist(x, z) < 6 || pathDist(x, z) < 5) continue
+    let ok = true
+    for (const p of trees) {
+      if (Math.hypot(p[0] - x, p[1] - z) < 8.2) { ok = false; break }
+    }
+    if (ok) trees.push([x, z])
+  }
+  for (const [x, z] of trees) addTree(bag.room(9000), x, z, 0.9 + rand() * 0.35)
+  const spots: Array<[number, number]> = [
+    [-28, -88], [-40, -96], [-62, 78], [-74, 88], [112, 40], [122, 28], [20, 100], [35, 112],
+    [-150, 120], [-60, -150], [150, -10], [140, 90],
+  ]
+  for (const [x, z] of spots) {
+    if (shoreDist(x, z) < 8 || pathDist(x, z) < 6 || forestAmount(x, z) > 0.2) continue
+    if (Math.hypot(x - HILL_POS.x, z - HILL_POS.z) < 40) continue
+    addTree(bag.room(9000), x, z, 0.85 + hash(x, z) * 0.3)
+  }
+  for (let i = 0; i < 28; i++) {
+    const th = rand() * Math.PI * 2
+    const r = pondRadius(th) + 4.2 + rand() * 3.5
+    const x = Math.cos(th) * r
+    const z = Math.sin(th) * r
+    if (shoreDist(x, z) < 3.2 || pathDist(x, z) < 4) continue
+    addTree(bag.room(1200), x, z, 0.7 + rand() * 0.45, true)
+  }
+  return bag.finish()
+}
+
+interface Lily {
+  x: number
+  z: number
+  r: number
+  rot: number
+  flower: number
+  squash: number
+}
+
+/** Shore drifts from the wonderland pond, kept off the jetty. */
+function placeLilies(): Lily[] {
+  const rand = rng(90210)
+  const range = (a: number, b: number) => a + rand() * (b - a)
+  const pads: Lily[] = []
+  const target = 96
+  const clear = (x: number, z: number, r: number) => {
+    if (shoreDist(x, z) > -1.1 - r || height(x, z) > -0.05) return false
+    if (x > JETTY.x1 - 2 && x < JETTY.x0 + 3 && Math.abs(z - JETTY.z) < 1.5 + r) return false
+    for (const p of pads) {
+      const dx = p.x - x
+      const dz = p.z - z
+      const rr = (p.r + r) * 1.04
+      if (dx * dx + dz * dz < rr * rr) return false
+    }
+    return true
+  }
+  const clusters: Array<{ cx: number; cz: number; s: number; a: number; e: number; w: number; bloom: boolean }> = [
+    { cx: 53.5, cz: 14.6, s: 2.6, a: 0.5, e: 0.6, w: 1.5, bloom: true },
+    { cx: 49, cz: 2.4, s: 2.2, a: 2.2, e: 0.7, w: 1.1, bloom: true },
+  ]
+  for (let c = 0; c < 18; c++) {
+    const th = range(0, Math.PI * 2)
+    const R = pondRadius(th) - range(2.5, 14)
+    clusters.push({
+      cx: Math.cos(th) * R,
+      cz: Math.sin(th) * R,
+      s: range(1.4, 3.6),
+      a: range(0, Math.PI),
+      e: range(0.45, 1),
+      w: range(0.5, 1.6),
+      bloom: false,
+    })
+  }
+  const wsum = clusters.reduce((sum, c) => sum + c.w, 0)
+  for (let guard = 0; pads.length < target && guard < target * 40; guard++) {
+    let pick = rand() * wsum
+    let c = clusters[0]
+    for (const k of clusters) {
+      pick -= k.w
+      if (pick <= 0) { c = k; break }
+    }
+    const u = (rand() + rand() + rand() - 1.5) * 1.35
+    const v = (rand() + rand() + rand() - 1.5) * 1.35 * c.e
+    const x = c.cx + (Math.cos(c.a) * u - Math.sin(c.a) * v) * c.s
+    const z = c.cz + (Math.sin(c.a) * u + Math.cos(c.a) * v) * c.s
+    const r = 0.15 + 0.3 * Math.pow(rand(), 1.4)
+    if (!clear(x, z, r)) continue
+    pads.push({
+      x, z, r,
+      rot: range(0, Math.PI * 2),
+      flower: rand() * (c.bloom ? 0.55 : 1),
+      squash: range(0.88, 1),
+    })
+  }
+  return pads
+}
+
+function lilyLeaf(seed: number): RGB {
+  if (seed < 0.38) return LEAF_LIGHT
+  if (seed < 0.74) return mix(LEAF_MID, GRASS_B, 0.55)
+  return mix(LEAF_MID, LEAF_DARK, 0.22)
+}
+
+/** Notched disc from the wonderland pad. The slit is the wedge left out of the ring. */
+function addLilyPad(b: Builder, pad: Lily): void {
+  const seg = 14
+  const wedge = 0.62
+  const y = 0.035
+  const base = lilyLeaf(hash(pad.x * 7.31, pad.z * 7.31 + 1.7))
+  const c = Math.cos(pad.rot)
+  const s = Math.sin(pad.rot)
+  const at = (lx: number, lz: number): [number, number, number] => [
+    pad.x + (c * lx - s * lz) * pad.r,
+    y,
+    pad.z + (s * lx + c * lz) * pad.r * pad.squash,
+  ]
+  const tone = (rr: number): RGB => {
+    const d = (rr - 0.8) / 0.03
+    const band = Math.exp(-d * d * 0.5)
+    return mul(base, 1 - 0.17 * Math.min(1, band))
+  }
+  const center = at(0, 0)
+  const ring: Array<[number, number, number]> = []
+  const cols: RGB[] = []
+  for (let i = 0; i <= seg; i++) {
+    const a = wedge / 2 + (i / seg) * (Math.PI * 2 - wedge)
+    const rr = 1 + 0.045 * Math.sin(a * 3 + 0.7)
+    ring.push(at(Math.cos(a) * rr, Math.sin(a) * rr))
+    cols.push(tone(rr))
+  }
+  const cc = tone(0)
+  for (let i = 0; i < seg; i++) {
+    const p1 = ring[i + 1]
+    const p0 = ring[i]
+    b.triangle(
+      center[0], center[1], center[2], cc,
+      p1[0], p1[1], p1[2], cols[i + 1],
+      p0[0], p0[1], p0[2], cols[i],
+      KIND_PROP, pad.x, y - 1, pad.z,
+    )
+  }
+}
+
+/** Upright petal cup. Outer ring, inner ring, yellow heart. */
+function addLilyBlossom(b: Builder, pad: Lily): void {
+  const sc = 0.13 + pad.r * 0.2
+  const y = 0.05
+  const rot = pad.rot * 1.7
+  const tint: RGB = pad.flower < 0.14 ? [1, 0.55, 0.72] : [1, 0.97, 0.93]
+  const c = Math.cos(rot)
+  const s = Math.sin(rot)
+  const at = (lx: number, ly: number, lz: number): [number, number, number] => {
+    const px = lx * sc
+    const pz = lz * sc
+    return [pad.x + c * px - s * pz, y + ly * sc * 0.95, pad.z + s * px + c * pz]
+  }
+  const tri = (
+    A: [number, number, number],
+    B: [number, number, number],
+    C: [number, number, number],
+    col: RGB,
+  ) => {
+    const pa = at(A[0], A[1], A[2])
+    const pb = at(B[0], B[1], B[2])
+    const pc = at(C[0], C[1], C[2])
+    b.triangle(
+      pa[0], pa[1], pa[2], col,
+      pb[0], pb[1], pb[2], col,
+      pc[0], pc[1], pc[2], col,
+      KIND_PROP, pad.x, y, pad.z,
+    )
+  }
+  const ring = (
+    n: number,
+    r0: number, y0: number,
+    rm: number, ym: number, hw: number,
+    r1: number, y1: number,
+    spin: number, toneLo: number, toneHi: number,
+  ) => {
+    const lo = mul(tint, toneLo)
+    const hi = mul(tint, toneHi)
+    for (let i = 0; i < n; i++) {
+      const a = spin + (i / n) * Math.PI * 2
+      const ca = Math.cos(a)
+      const sa = Math.sin(a)
+      const B: [number, number, number] = [ca * r0, y0, sa * r0]
+      const T: [number, number, number] = [ca * r1, y1, sa * r1]
+      const L: [number, number, number] = [ca * rm - sa * hw, ym, sa * rm + ca * hw]
+      const R: [number, number, number] = [ca * rm + sa * hw, ym, sa * rm - ca * hw]
+      tri(B, L, R, lo)
+      tri(L, T, R, hi)
+    }
+  }
+  ring(7, 0.12, 0.04, 0.74, 0.3, 0.32, 1.0, 0.6, 0, 0.8, 1.0)
+  ring(5, 0.08, 0.1, 0.4, 0.55, 0.26, 0.5, 1.0, 0.4, 0.88, 1.06)
+  const heart: RGB = [1, 0.8, 0.22]
+  for (let i = 0; i < 6; i++) {
+    const a0 = (i / 6) * Math.PI * 2
+    const a1 = ((i + 1) / 6) * Math.PI * 2
+    tri(
+      [0, 0.62, 0],
+      [Math.cos(a1) * 0.24, 0.5, Math.sin(a1) * 0.24],
+      [Math.cos(a0) * 0.24, 0.5, Math.sin(a0) * 0.24],
+      heart,
+    )
+  }
+}
+
+function lilyMesh(): MeshData {
+  const b = new Builder()
+  const pads = placeLilies()
+  for (const pad of pads) addLilyPad(b, pad)
+  for (const pad of pads) {
+    if (pad.r > 0.25 && pad.flower < 0.24) addLilyBlossom(b, pad)
+  }
+  return b.empty ? emptyMesh() : b.finish(false, true)
+}
+
+function ridgeMesh(): MeshData {
+  const b = new Builder()
+  const rings = [
+    { r: 395, h: 26, base: [0.498, 0.682, 0.322] as RGB, seed: 1.3, f: 5 },
+    { r: 560, h: 52, base: [0.416, 0.616, 0.345] as RGB, seed: 4.1, f: 4 },
+    { r: 820, h: 95, base: [0.365, 0.561, 0.400] as RGB, seed: 8.7, f: 3 },
+    { r: 1250, h: 170, base: [0.341, 0.498, 0.463] as RGB, seed: 12.9, f: 2.4 },
+  ]
+  for (const ring of rings) {
+    const n = 96
+    for (let i = 0; i < n; i++) {
+      const a0 = (i / n) * Math.PI * 2
+      const a1 = ((i + 1) / n) * Math.PI * 2
+      const prof = (a: number) => {
+        const p = fbm2(Math.cos(a) * ring.f + ring.seed, Math.sin(a) * ring.f + ring.seed * 1.7, 4)
+        return ring.h * (0.25 + 1.5 * Math.max(0, p - 0.22))
+      }
+      const ringR = (a: number) => ring.r * (1 + 0.06 * Math.sin(a * 3 + ring.seed))
+      const x0 = Math.cos(a0)
+      const z0 = Math.sin(a0)
+      const x1 = Math.cos(a1)
+      const z1 = Math.sin(a1)
+      const r0 = ringR(a0)
+      const r1 = ringR(a1)
+      b.quad(
+        x0 * r0, -6, z0 * r0,
+        x1 * r1, -6, z1 * r1,
+        x1 * (r1 + 30), prof(a1), z1 * (r1 + 30),
+        x0 * (r0 + 30), prof(a0), z0 * (r0 + 30),
+        ring.base, 0, 0, ring.h * 0.3, 0,
+      )
+    }
+  }
+  const mesh = b.finish(false, true)
+  mesh.role = 'ground'
+  return mesh
+}
+
+function rainStreak(
+  b: Builder,
+  x: number, y: number, z: number,
+  len: number, halfW: number,
+  rank: number, phase: number,
+  tint: RGB,
+): void {
+  const corners: Array<[number, number]> = [
+    [-halfW, 0],
+    [halfW, 0],
+    [halfW, -len],
+    [-halfW, -len],
+  ]
+  const ids = corners.map(([dx, dy]) => b.vertex(x, y, z, dx, dy, 1, tint, KIND_RAIN, rank, phase))
+  b.tri(ids[0], ids[1], ids[2])
+  b.tri(ids[0], ids[2], ids[3])
+}
+
+function splashCard(b: Builder, x: number, z: number, rank: number, phase: number): void {
+  const tint: RGB = [0.9, 0.95, 1]
+  const corners: Array<[number, number]> = [[-1, -1], [1, -1], [1, 1], [-1, 1]]
+  const ids = corners.map(([cx, cz]) => b.vertex(x, -1, z, cx, cz, 1, tint, 3.2, rank, phase))
+  b.tri(ids[0], ids[1], ids[2])
+  b.tri(ids[0], ids[2], ids[3])
+}
+
+/** Streaks and splash rings share one mesh. The shader wraps them around the camera. */
+function rainMesh(): MeshData {
+  const b = new Builder()
+  const tint: RGB = [0.78, 0.84, 0.95]
+  const span = 28
+  const column = 16
+  const nx = 16
+  const nz = 14
+  const layers = 3
+  for (let layer = 0; layer < layers; layer++) {
+    for (let iz = 0; iz < nz; iz++) {
+      for (let ix = 0; ix < nx; ix++) {
+        const jx = (hash(ix + layer * 17, iz + 3) - 0.5) * (span / nx)
+        const jz = (hash(iz + layer * 9, ix + 5) - 0.5) * (span / nz)
+        const x = (ix + 0.5) / nx * span - span / 2 + jx
+        const z = (iz + 0.5) / nz * span - span / 2 + jz
+        const head = hash(ix + layer * 13, iz + 8) * column
+        const len = 0.85 + hash(ix + 2, iz + layer) * 0.7
+        const halfW = 0.012 + hash(layer, ix + iz) * 0.01
+        const rank = hash(ix * 5 + layer, iz * 7 + 4)
+        rainStreak(b, x, head, z, len, halfW, rank, head / column, tint)
+      }
+    }
+  }
+  const splashN = 6
+  for (let iz = 0; iz < splashN; iz++) {
+    for (let ix = 0; ix < splashN; ix++) {
+      const jx = (hash(ix + 40, iz + 2) - 0.5) * (span / splashN)
+      const jz = (hash(iz + 11, ix + 6) - 0.5) * (span / splashN)
+      const x = (ix + 0.5) / splashN * span - span / 2 + jx
+      const z = (iz + 0.5) / splashN * span - span / 2 + jz
+      splashCard(b, x, z, hash(ix + 3, iz + 9), hash(ix * 3, iz + 4))
+    }
+  }
+  const mesh = b.finish(false, true)
+  mesh.blended = true
+  mesh.doubleSided = true
+  return mesh
 }
 
 export interface AmbienceBed {
   name: string
-  /** Full volume inside this many meters of the water. */
   full: number
-  /** Silent at and beyond this distance. */
   reach: number
   trimDb: number
-  /** Horizontal meters from the listener to the water edge. */
   distance(x: number, z: number, y: number): number
 }
 
-export function ambienceFor(scene: SceneKind): AmbienceBed[] {
-  setActivePreset(scene)
-  const layout = PRESET_LAYOUTS.find((p) => p.id === scene) ?? PRESET_LAYOUTS[0]
-  const ox = layout.ox
-  const oz = layout.oz
-  const shore = shorePoints(ox, oz)
-  const beds: AmbienceBed[] = [{
-    name: 'Ocean_Calm_Quad',
-    full: 40,
-    reach: 125,
+export function ambienceFor(_scene: SceneKind): AmbienceBed[] {
+  return [{
+    name: 'Lake_Quad',
+    full: 12,
+    reach: 70,
     trimDb: 0,
-    distance(x, z, y) {
-      const shell = nearestShore(shore, x, z)
-      if (y > 18 && shell > 75) return Infinity
-      return shell
+    distance(x, z) {
+      return Math.max(0, shoreDist(x, z))
     },
   }]
-  if (RIVER_PATHS.length) {
-    beds.push({
-      name: 'River_Quad',
-      full: 40,
-      reach: 64,
-      trimDb: -6,
-      distance(x, z) {
-        let best = Infinity
-        const wx = x + ox
-        const wz = z + oz
-        for (const path of RIVER_PATHS) best = Math.min(best, shellToPath(wx, wz, path))
-        return best
-      },
-    })
-  }
-  const big = FALLS_SPECS.filter((spec) => spec.tall >= 20)
-  const small = FALLS_SPECS.filter((spec) => spec.tall < 20)
-  const fallBed = (name: string, specs: FallsSpec[], full: number, reach: number, trimDb: number): AmbienceBed | null => {
-    if (!specs.length) return null
-    return {
-      name,
-      full,
-      reach,
-      trimDb,
-      distance(x, z) {
-        let best = Infinity
-        for (const spec of specs) best = Math.min(best, Math.hypot(x + ox - spec.x, z + oz - spec.z))
-        return best
-      },
-    }
-  }
-  const bigBed = fallBed('Waterfall_Big_Quad', big, 20, 64, -8)
-  const smallBed = fallBed('Waterfall_Small_Quad', small, 24, 72, 0)
-  if (bigBed) beds.push(bigBed)
-  if (smallBed) beds.push(smallBed)
-  return beds
 }
 
-export const FIRE_POS = { x: 2, y: 1, z: 2 }
-
 export interface WorldMeshes {
-  terrain: MeshData
-  water: MeshData
-  grass: MeshData
-  trees: MeshData
-  rocks: MeshData
-  cabin: MeshData
-  clouds: MeshData
-  river: MeshData
-  lake: MeshData
-  falls: MeshData
-  props: MeshData
+  pieces: MeshData[]
   rain: MeshData
-  fire: MeshData
   scene: SceneKind
 }
 
-export function buildWorld(scene: SceneKind = 'p01'): WorldMeshes {
-  setActivePreset(scene)
-  const layout = PRESET_LAYOUTS.find((p) => p.id === scene) ?? PRESET_LAYOUTS[0]
-  const inland = buildInlandWater(layout.ox, layout.oz)
-  const placed = buildPlaced(layout)
-  const clouds = cloudMesh()
-  clouds.blended = true
-  inland.falls.blended = true
-  const rain = rainMesh(scene)
-  rain.blended = true
-
-  return {
-    terrain: terrainMesh(),
-    water: waterMesh(),
-    grass: placed.grass,
-    trees: placed.trees,
-    rocks: placed.rocks,
-    cabin: emptyMesh(),
-    clouds,
-    river: inland.river,
-    lake: (() => { const lake = emptyMesh(); lake.reflect = false; return lake })(),
-    falls: inland.falls,
-    props: placed.props,
-    rain,
-    fire: emptyMesh(),
-    scene,
-  }
+export function buildWorld(_scene: SceneKind = 'meadow'): WorldMeshes {
+  const pieces = [
+    ...terrainMeshes(),
+    waterMesh(),
+    lilyMesh(),
+    ...grassMeshes(),
+    ...flowerMeshes(),
+    ...treeMeshes(),
+    ridgeMesh(),
+    jettyMesh(),
+  ]
+  return { pieces, rain: rainMesh(), scene: 'meadow' }
 }

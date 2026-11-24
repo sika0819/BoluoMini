@@ -2,10 +2,10 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content" />
   <title>波萝小程序</title>
   <style>
-    html,body{margin:0;height:100%;background:#111;overflow:hidden}
+    html,body{margin:0;height:100%;width:100%;background:#111;overflow:hidden;position:fixed;inset:0}
     #boot{position:fixed;inset:0;width:100%;height:100%;object-fit:fill;z-index:0;background:#111}
     #boluo,#ui{position:fixed;touch-action:none;background:transparent}
     #boluo{inset:0;width:100vw;height:100vh;z-index:1}
@@ -18,6 +18,6 @@
   <video id="boot" playsinline muted loop></video>
   <canvas id="boluo"></canvas>
   <canvas id="ui"></canvas>
-  <script src="game.js?v=52"></script>
+  <script src="game.js?v=69"></script>
 </body>
 </html>

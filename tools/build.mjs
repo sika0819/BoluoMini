@@ -90,6 +90,8 @@ mkdirSync(join(dist, 'chunks'), { recursive: true })
 copyFileSync(join(root, 'public/chunks/far.json'), join(dist, 'chunks/far.json'))
 const audioDir = join(root, 'public/audio')
 if (existsSync(audioDir)) cpSync(audioDir, join(dist, 'audio'), { recursive: true })
+const actorDir = join(root, 'public/actor')
+if (existsSync(actorDir)) cpSync(actorDir, join(dist, 'actor'), { recursive: true })
 
 const gameJson = JSON.stringify({
   deviceOrientation: 'portrait',
@@ -103,6 +105,7 @@ function emit(platform, extra) {
   cpSync(join(dist, 'ui'), join(dir, 'ui'), { recursive: true })
   cpSync(join(dist, 'oil'), join(dir, 'oil'), { recursive: true })
   if (existsSync(join(dist, 'audio'))) cpSync(join(dist, 'audio'), join(dir, 'audio'), { recursive: true })
+  if (existsSync(join(dist, 'actor'))) cpSync(join(dist, 'actor'), join(dir, 'actor'), { recursive: true })
   writeFileSync(join(dir, 'game.json'), gameJson)
   if (extra) writeFileSync(join(dir, 'project.config.json'), JSON.stringify(extra, null, 2))
 }

@@ -1,5 +1,5 @@
 import type { AudioClip, Host, SpatialVoice } from '../host/types'
-import { BANKS, CLIPS, weatherClip } from './catalog'
+import { BANKS, CLIPS, grassClip, weatherClip } from './catalog'
 import { ambienceFor, type AmbienceBed } from '../scene/world'
 import type { SceneKind } from '../scene/island'
 import type { WeatherKind } from './catalog'
@@ -35,10 +35,16 @@ export class Ambience {
   private loading = new Set<string>()
   private musicName = ''
   private musicVoice: SpatialVoice | null = null
+  private musicElapsed = 0
+  private musicMark = 0
+  private musicDuration = 0
+  private levelArmed = false
+  /** Fires once when the selected level's clip actually starts. */
+  onLevelStart: ((seconds: number) => void) | null = null
   private beds = new Map<string, { src: string; voice: SpatialVoice }>()
 
   constructor(private host: Host) {
-    this.zones = this.bind('p01')
+    this.zones = this.bind('meadow')
   }
 
   private bind(scene: SceneKind): BedRuntime[] {
@@ -68,8 +74,38 @@ export class Ambience {
     }
     this.musicName = name
     this.stopMusic()
+    this.musicElapsed = 0
+    this.musicDuration = 0
+    this.levelArmed = false
     const src = BANKS.find((b) => b.name === name)?.src
     if (src) this.clip(src)
+  }
+
+  /** Restart a track as a level, even when it is already the current song. Plays once. */
+  playLevel(name: string): void {
+    this.musicName = ''
+    this.stopMusic()
+    this.musicElapsed = 0
+    this.musicMark = 0
+    this.musicDuration = 0
+    this.levelArmed = true
+    this.musicName = name
+    const src = BANKS.find((b) => b.name === name)?.src
+    if (src) this.clip(src)
+  }
+
+  /** Advance the song clock only while the context is actually playing. */
+  tickMusic(now: number, running: boolean): void {
+    if (!this.musicDuration || !this.musicVoice) {
+      this.musicMark = now
+      return
+    }
+    if (running && this.musicMark) this.musicElapsed += Math.max(0, now - this.musicMark)
+    this.musicMark = now
+  }
+
+  songOver(): boolean {
+    return this.musicDuration > 0 && !!this.musicVoice && this.musicElapsed >= this.musicDuration * 1000
   }
 
   private stopMusic(): void {
@@ -91,7 +127,7 @@ export class Ambience {
       web.resume()
       return
     }
-    this.syncMusic(web)
+    this.syncMusic(web, this.host.now())
   }
 
   pause(): void {
@@ -114,6 +150,7 @@ export class Ambience {
     fz: number,
     weather: WeatherKind,
     weatherLevel: number,
+    period: number,
   ): void {
     if (!this.uncovered || this.paused) return
     const web = this.host.webAudio()
@@ -122,17 +159,18 @@ export class Ambience {
       return
     }
     web?.setListener(x, y, z, fx, fy, fz)
-    this.syncMusic(web)
+    this.syncMusic(web, now)
     let nearWater = false
     let best: BedRuntime | null = null
     let bestGain = 0
     const heard: Array<{ zone: BedRuntime; gain: number }> = []
+    let waterGain = 0
     for (const zone of this.zones) {
       const gain = zone.src ? distanceGain(zone.distance(x, z, y), zone.full, zone.reach, zone.trimDb) : 0
       heard.push({ zone, gain })
-      if (gain > 0 && (zone.name.startsWith('Ocean') || zone.name.startsWith('River') || zone.name.startsWith('Waterfall'))) {
-        nearWater = true
-      }
+      const wet = zone.name.startsWith('Ocean') || zone.name.startsWith('River') || zone.name.startsWith('Waterfall') || zone.name.startsWith('Lake')
+      if (gain > 0 && wet) nearWater = true
+      if (wet && gain > waterGain) waterGain = gain
       if (gain > bestGain) {
         best = zone
         bestGain = gain
@@ -161,12 +199,15 @@ export class Ambience {
     const windSrc = weather === 'wind' && level > 0 ? weatherClip('wind', level) : ''
     const rainSrc = weather === 'rain' && level > 0 ? weatherClip('rain', level) : ''
     const waterSrc = rainSrc && nearWater ? CLIPS.Rain_Water : ''
+    const rainDuck = rainSrc ? 0.4 : 1
+    const grassGain = this.fxGain * 0.7 * rainDuck * (1 - 0.45 * waterGain)
+    this.syncBed(web, 'grass', grassClip(period, weather), grassGain)
     this.syncBed(web, 'wind', windSrc, this.fxGain * 0.7)
     this.syncBed(web, 'rain', rainSrc, this.fxGain * 0.75)
     this.syncBed(web, 'rain-water', waterSrc, this.fxGain * 0.45)
   }
 
-  private syncMusic(web: ReturnType<Host['webAudio']>): void {
+  private syncMusic(web: ReturnType<Host['webAudio']>, now: number): void {
     if (!this.musicName || this.musicVoice || !web) return
     const name = this.musicName
     const src = BANKS.find((b) => b.name === name)?.src
@@ -174,8 +215,14 @@ export class Ambience {
     const clip = this.clip(src)
     if (!clip || this.musicName !== name || this.musicVoice) return
     this.stopMusic()
-    this.musicVoice = web.playClip(clip, true, false, 0, 0, 0, 1, 1)
+    this.musicVoice = web.playClip(clip, false, false, 0, 0, 0, 1, 1)
     this.musicVoice.setGain(this.musicGain)
+    this.musicDuration = clip.duration
+    this.musicElapsed = 0
+    this.musicMark = now
+    if (!this.levelArmed) return
+    this.levelArmed = false
+    this.onLevelStart?.(clip.duration)
   }
 
   private syncBed(web: ReturnType<Host['webAudio']>, key: string, src: string, gain: number): void {
