@@ -1,13 +1,16 @@
 import {
   ApiFail,
+  APP_VERSION,
   deviceBody,
   request,
   setDeviceId,
   setUserToken,
   useBrowserProxy,
+  useCorsProxy,
   type ApiResult,
   type DeviceProfile,
 } from './client'
+import { boluoEnv } from './env'
 
 const SESSION = 'boluo.session'
 const DEVICE = 'boluo.device'
@@ -52,6 +55,17 @@ let store: Store = {
   set: (key, value) => { memory.set(key, value) },
   remove: (key) => { memory.delete(key) },
 }
+function localDevHost(): boolean {
+  if (typeof location === 'undefined') return false
+  const host = location.hostname
+  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.local')) return true
+  const parts = host.split('.').map((part) => Number(part))
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false
+  if (parts[0] === 10 || parts[0] === 127) return true
+  if (parts[0] === 192 && parts[1] === 168) return true
+  return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31
+}
+
 let user: BoluoUser | null = null
 let deviceToken = ''
 let deviceExpire = 0
@@ -59,6 +73,45 @@ let cipher = ''
 let profile: DeviceProfile | null = null
 let deviceFlight: Promise<string> | null = null
 let renewingUser = false
+/** null until AppLaunch answers. True only when feature.touristLogin is 1. */
+let guestAllowed: boolean | null = null
+let guestFlight: Promise<boolean> | null = null
+
+export function guestLoginOpen(): boolean {
+  return guestAllowed === true
+}
+
+/** Product turns guest login off with feature.touristLogin = 2. Do not call touristLogin then. */
+export async function guestLoginEnabled(): Promise<boolean> {
+  if (guestAllowed !== null) return guestAllowed
+  if (!guestFlight) guestFlight = readGuestFlag().finally(() => { guestFlight = null })
+  return guestFlight
+}
+
+async function readGuestFlag(): Promise<boolean> {
+  try {
+    await ensureDevice(false)
+    const data = await postJson('/boluo/v1/system/appLaunch', {
+      latitude: 0,
+      longitude: 0,
+      accuracy: 0,
+      deviceTime: Math.floor(Date.now() / 1000),
+      networkType: 'WiFi',
+      carrierName: 'unknown',
+      brand: profile?.brand || 'web',
+      model: profile?.model || 'web',
+      osVersion: profile?.osVersion || '',
+      chip: 'web',
+      appVersion: APP_VERSION,
+    })
+    const feature = data.feature
+    const flag = feature && typeof feature === 'object' ? Number((feature as { touristLogin?: unknown }).touristLogin) : 0
+    guestAllowed = flag === 1
+  } catch {
+    guestAllowed = false
+  }
+  return guestAllowed
+}
 
 export function bindNet(host: {
   kind: string
@@ -66,7 +119,9 @@ export function bindNet(host: {
   storageSet(key: string, value: string): void
   storageRemove(key: string): void
 }): void {
-  useBrowserProxy(host.kind === 'browser')
+  const local = host.kind === 'browser' && localDevHost()
+  useBrowserProxy(local)
+  useCorsProxy(!local && host.kind === 'browser' ? boluoEnv.corsProxy : '')
   store = {
     get: (key) => host.storageGet(key),
     set: (key, value) => host.storageSet(key, value),
@@ -117,6 +172,7 @@ export async function logoutSession(): Promise<BoluoUser | null> {
 }
 
 export async function enterGuest(): Promise<BoluoUser | null> {
+  if (!(await guestLoginEnabled())) return null
   if (renewingUser) return null
   renewingUser = true
   const previous = user?.token || ''

@@ -1,5 +1,5 @@
 import { stageFit } from '../ui/fit'
-import type { AudioClip, Host, HostCanvas, InnerVoice, SpatialVoice, TouchPoint, WebAudioHost } from './types'
+import type { AudioClip, Host, HostCanvas, InnerVoice, MusicVoice, SpatialVoice, TouchPoint, WebAudioHost } from './types'
 
 /** Keep the 3D buffer near 720p. High-dpi panels were filling pixels, not triangles. */
 function glScale(cssW: number, cssH: number, dpr: number): number {
@@ -8,6 +8,90 @@ function glScale(cssW: number, cssH: number, dpr: number): number {
   const budget = 1280 * 720
   if (area * cap * cap <= budget) return cap
   return Math.max(1, Math.min(cap, Math.sqrt(budget / area)))
+}
+
+/** Playlist player. Volume lives on the element, not on a shared WebAudio gain. */
+function createBrowserMusic(): MusicVoice {
+  const audio = new Audio()
+  audio.preload = 'auto'
+  audio.crossOrigin = 'anonymous'
+  let want = false
+  let current = ''
+  let volume = 1
+  let heard = false
+  let nextTry = 0
+  const abs = (url: string): string => {
+    try { return new URL(url, location.href).href } catch { return url }
+  }
+  audio.addEventListener('playing', () => {
+    if (current && audio.src === current) heard = true
+  })
+  const tryPlay = () => {
+    if (!want || !current) return
+    if (heard && !audio.paused) return
+    const now = performance.now()
+    if (now < nextTry) return
+    nextTry = now + 400
+    audio.volume = volume
+    void audio.play().catch(() => { /* autoplay waits for a gesture */ })
+  }
+  return {
+    load(url, restart) {
+      if (!url) {
+        this.stop()
+        return
+      }
+      const next = abs(url)
+      const same = current === next
+      if (!same) {
+        heard = false
+        audio.src = url
+        // Keep the resolved url so the playing event still matches after a path prefix.
+        current = audio.src || next
+      }
+      if (!same || restart) {
+        heard = false
+        try { audio.currentTime = 0 } catch { /* metadata not in yet */ }
+      }
+      want = true
+      nextTry = 0
+      audio.volume = volume
+      void audio.play().catch(() => { /* autoplay waits for a gesture */ })
+    },
+    warm(url) {
+      if (!url) return
+      const next = abs(url)
+      if (current === next) return
+      audio.preload = 'auto'
+      audio.src = url
+      current = audio.src || next
+    },
+    setVolume(v) {
+      volume = Math.max(0, Math.min(1, v))
+      audio.volume = volume
+    },
+    duration() {
+      return Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0
+    },
+    position() {
+      const at = audio.currentTime
+      return Number.isFinite(at) && at > 0 ? at : 0
+    },
+    started() { return heard && this.duration() > 0 },
+    stop() {
+      want = false
+      heard = false
+      current = ''
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+    },
+    pause() {
+      nextTry = 0
+      audio.pause()
+    },
+    resume() { tryPlay() },
+  }
 }
 
 export function createBrowserHost(): Host {
@@ -58,6 +142,18 @@ export function createBrowserHost(): Host {
   const screen = canvas as unknown as HostCanvas
   const video = document.getElementById('boot') as HTMLVideoElement | null
   const hit = ui ?? canvas
+  let bootMark = 0
+  let bootBad = false
+  let ctx: AudioContext | null = null
+  let fxVolume = 1
+  const musicVoice = createBrowserMusic()
+  if (video) {
+    video.addEventListener('playing', () => {
+      if (!bootMark) bootMark = performance.now()
+      video.style.zIndex = '3'
+    })
+    video.addEventListener('error', () => { bootBad = true })
+  }
   let web: WebAudioHost | null | undefined
   const ensureWeb = (): WebAudioHost | null => {
     if (web !== undefined) return web
@@ -66,7 +162,7 @@ export function createBrowserHost(): Host {
       web = null
       return web
     }
-    const ctx = new Ctx()
+    ctx = new Ctx()
     const start = (
       buffer: AudioBuffer,
       loop: boolean,
@@ -106,7 +202,7 @@ export function createBrowserHost(): Host {
           panner.positionY.value = py
           panner.positionZ.value = pz
         },
-        setGain(v) { gain.gain.value = v },
+        setGain(v) { gain.gain.value = Math.max(0, v) },
         stop() {
           gain.gain.value = 0
           try { gain.disconnect() } catch { /* already detached */ }
@@ -132,15 +228,17 @@ export function createBrowserHost(): Host {
         const length = Math.max(1, Math.floor(rate * seconds))
         const buffer = ctx.createBuffer(1, length, rate)
         const data = buffer.getChannelData(0)
+        const amp = 0.22 * fxVolume
         for (let i = 0; i < length; i++) {
           const env = 1 - i / length
-          data[i] = Math.sin((i / rate) * freq * Math.PI * 2) * 0.22 * env
+          data[i] = Math.sin((i / rate) * freq * Math.PI * 2) * amp * env
         }
         const source = ctx.createBufferSource()
         source.buffer = buffer
         source.connect(ctx.destination)
         source.start()
       },
+      setFxVolume(v) { fxVolume = Math.max(0, Math.min(1, v)) },
       decode(data: ArrayBuffer): Promise<AudioClip> {
         const copy = data.slice(0)
         return new Promise((resolve, reject) => {
@@ -168,6 +266,20 @@ export function createBrowserHost(): Host {
     }
     return web
   }
+  const kick = () => {
+    void video?.play().catch(() => { /* still muted; a later tap retries */ })
+    const audio = ensureWeb()
+    if (!audio || !ctx) return
+    const buffer = ctx.createBuffer(1, 1, ctx.sampleRate)
+    const source = ctx.createBufferSource()
+    source.buffer = buffer
+    source.connect(ctx.destination)
+    try { source.start() } catch { /* already started */ }
+    audio.resume()
+    musicVoice.resume()
+  }
+  window.addEventListener('pointerdown', kick, { capture: true })
+  window.addEventListener('keydown', kick, { capture: true })
   return {
     kind: 'browser',
     allowGlExtensions: true,
@@ -199,8 +311,23 @@ export function createBrowserHost(): Host {
       video.muted = true
       video.loop = true
       video.playsInline = true
-      video.src = url
+      video.preload = 'auto'
+      const wanted = url.charAt(0) === '/' ? url : `/${url}`
+      const current = video.currentSrc ? new URL(video.currentSrc, location.href).pathname : ''
+      if (!current.endsWith(wanted)) {
+        bootMark = 0
+        bootBad = false
+        video.src = url
+      }
       void video.play().catch(() => { /* autoplay can wait for a gesture */ })
+    },
+    bootReady(sinceBoot) {
+      if (!video) return sinceBoot >= 1200
+      if (bootBad) return true
+      if (bootMark > 0 && performance.now() - bootMark >= 1100) return true
+      // A cold visit can spend several seconds just fetching the video.
+      // Don't hold the first music behind a clip that hasn't shown a frame.
+      return sinceBoot >= 2200
     },
     closeBootVideo() {
       if (!video) return
@@ -216,9 +343,7 @@ export function createBrowserHost(): Host {
       }
       hit.addEventListener('pointerdown', (ev) => {
         start(local(ev))
-        // A context created during boot stays suspended until a real tap.
-        // Create it inside the gesture so the first tap unlocks playback.
-        void ensureWeb()?.resume()
+        kick()
       })
       hit.addEventListener('pointermove', (ev) => { if (ev.buttons) move(local(ev)) })
       hit.addEventListener('pointerup', (ev) => end(local(ev)))
@@ -241,6 +366,7 @@ export function createBrowserHost(): Host {
         stop() { audio.pause() },
       }
     },
+    music: () => musicVoice,
     webAudio(): WebAudioHost | null {
       return ensureWeb()
     },

@@ -1,6 +1,7 @@
 /**
  * Walk the meadow. Feet follow the ground. The pond and the outer rim stop the step.
  */
+import { campfireBlocks } from './campfire'
 import { height, shoreDist, WALK_R, type SceneKind } from './island'
 
 export const EYE_HEIGHT = 1.7
@@ -26,6 +27,7 @@ export function footY(lx: number, lz: number): number {
 export function canOccupy(lx: number, lz: number, _fromX = lx, _fromZ = lz, _solids: Solid[] = []): boolean {
   if (lx * lx + lz * lz > WALK_R * WALK_R) return false
   if (shoreDist(lx, lz) < 0.85) return false
+  if (campfireBlocks(lx, lz)) return false
   return true
 }
 

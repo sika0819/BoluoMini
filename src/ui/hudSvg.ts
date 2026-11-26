@@ -37,18 +37,42 @@ export const presetSvg = "<svg width=\"40\" height=\"40\" viewBox=\"0 0 40 40\" 
 
 export function timeSvgFor(degrees: number): string {
   // The green sector points down. Morning is 0° and must point left.
-  const deg = degrees - 90
+  const deg = degrees + 90
   return timeSvg.replace(
     'id="Group 1739334234"',
     `id="Group 1739334234" transform="rotate(${deg} 18 18)"`,
   )
 }
 
+/** Ring and plate only. The white sector and the green hand rotate together. */
+export const timeFaceSvg = timeSvg
+  .replace(/<path id="Ellipse 6247"[\s\S]*?\/>/, '')
+  .replace(/<g id="Group 1739334234"[\s\S]*?<\/g>/, '')
+
+/** Volume tracks without knobs. The live green fill and knobs follow the levels. */
+export const volumeBaseSvg = volumeSvg
+  .replace(/<circle[^>]*\/>/g, '')
+  .replace(/stroke="#A6FF00"/g, 'stroke="#AEAEB2"')
+
 const cache = new Map<string, HTMLImageElement>()
 let svgRev = 0
 
 export function hudSvgRev(): number {
   return svgRev
+}
+
+function sharpSvg(svg: string): string {
+  const box = svg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/)
+  if (!box) return svg
+  const w = Number(box[1])
+  const h = Number(box[2])
+  const long = Math.max(w, h)
+  if (!long) return svg
+  const scale = 256 / long
+  return svg.replace(
+    /<svg width="[\d.]+" height="[\d.]+"/,
+    `<svg width="${Math.round(w * scale)}" height="${Math.round(h * scale)}"`,
+  )
 }
 
 function hudImage(key: string, svg: string): HTMLImageElement | null {
@@ -58,7 +82,7 @@ function hudImage(key: string, svg: string): HTMLImageElement | null {
     image = new Image()
     image.onload = () => { svgRev += 1 }
     image.onerror = () => { svgRev += 1 }
-    image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+    image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(sharpSvg(svg))
     cache.set(key, image)
   }
   return image.complete && image.naturalWidth > 0 ? image : null

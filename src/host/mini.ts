@@ -1,5 +1,5 @@
 import { stageFit } from '../ui/fit'
-import type { AudioClip, Host, HostCanvas, HostKind, InnerVoice, Rect, TouchPoint, WebAudioHost, SpatialVoice } from './types'
+import type { AudioClip, Host, HostCanvas, HostKind, InnerVoice, MusicVoice, Rect, TouchPoint, WebAudioHost, SpatialVoice } from './types'
 
 interface MiniApi {
   createCanvas: () => HostCanvas
@@ -7,8 +7,17 @@ interface MiniApi {
     src: string
     loop: boolean
     volume: number
+    duration?: number
+    currentTime?: number
+    paused?: boolean
     play: () => void
+    pause?: () => void
     stop: () => void
+    seek?: (position: number) => void
+    onPlay?: (cb: () => void) => void
+    onPause?: (cb: () => void) => void
+    onStop?: (cb: () => void) => void
+    onEnded?: (cb: () => void) => void
   }
   createWebAudioContext?: () => WebAudioContextLike
   downloadFile?: (opts: {
@@ -98,11 +107,100 @@ function wrapInner(api: MiniApi): InnerVoice {
   }
 }
 
+/** Playlist player. Its volume is not a WebAudio gain, so it stays off the effect bus. */
+function createMiniMusic(api: MiniApi): MusicVoice {
+  const ctx = api.createInnerAudioContext ? api.createInnerAudioContext() : null
+  let want = false
+  let current = ''
+  let volume = 1
+  let heard = false
+  let playing = false
+  let nextTry = 0
+  if (ctx) {
+    ctx.onPlay?.(() => { playing = true; heard = true })
+    ctx.onPause?.(() => { playing = false })
+    ctx.onStop?.(() => { playing = false })
+    ctx.onEnded?.(() => { playing = false })
+  }
+  const tryPlay = () => {
+    if (!ctx || !want || !current) return
+    if (heard && playing && ctx.paused !== true) return
+    const now = Date.now()
+    if (now < nextTry) return
+    nextTry = now + 400
+    ctx.volume = volume
+    try { ctx.play() } catch { /* wait for a tap */ }
+  }
+  return {
+    load(url, restart) {
+      if (!ctx) return
+      if (!url) {
+        this.stop()
+        return
+      }
+      const same = current === url
+      if (!same) {
+        heard = false
+        playing = false
+        current = url
+        ctx.src = url
+        ctx.loop = false
+      } else if (restart) {
+        heard = false
+        playing = false
+        try { ctx.seek?.(0) } catch { /* metadata not in yet */ }
+      }
+      want = true
+      nextTry = 0
+      ctx.volume = volume
+      try { ctx.play() } catch { /* wait for a tap */ }
+    },
+    warm(url) {
+      if (!ctx || !url || current === url) return
+      current = url
+      ctx.src = url
+      ctx.loop = false
+    },
+    setVolume(v) {
+      volume = Math.max(0, Math.min(1, v))
+      if (ctx) ctx.volume = volume
+    },
+    duration() {
+      const dur = ctx?.duration ?? 0
+      return Number.isFinite(dur) && dur > 0 ? dur : 0
+    },
+    position() {
+      const at = ctx?.currentTime ?? 0
+      return Number.isFinite(at) && at > 0 ? at : 0
+    },
+    started() { return heard && this.duration() > 0 },
+    stop() {
+      want = false
+      heard = false
+      playing = false
+      current = ''
+      try { ctx?.stop() } catch { /* already stopped */ }
+    },
+    pause() {
+      playing = false
+      nextTry = 0
+      if (!ctx) return
+      if (ctx.pause) {
+        try { ctx.pause() } catch { /* already quiet */ }
+        return
+      }
+      try { ctx.stop() } catch { /* already quiet */ }
+    },
+    resume() { tryPlay() },
+  }
+}
+
 function wrapWeb(api: MiniApi): WebAudioHost | null {
   if (!api.createWebAudioContext) return null
   if (api.canIUse && !api.canIUse('createWebAudioContext')) return null
   const ctx = api.createWebAudioContext()
   const hasPanner = typeof ctx.createPanner === 'function'
+  let fxVolume = 1
   const start = (
     buffer: AudioBuffer,
     loop: boolean,
@@ -137,7 +235,7 @@ function wrapWeb(api: MiniApi): WebAudioHost | null {
       setPosition(px, py, pz) {
         if (panner) panner.setPosition(px, py, pz)
       },
-      setGain(v) { gain.gain.value = v },
+      setGain(v) { gain.gain.value = Math.max(0, v) },
       stop() {
         gain.gain.value = 0
         try { gain.disconnect() } catch { /* already detached */ }
@@ -163,15 +261,17 @@ function wrapWeb(api: MiniApi): WebAudioHost | null {
       const length = Math.max(1, Math.floor(rate * seconds))
       const buffer = ctx.createBuffer(1, length, rate)
       const data = buffer.getChannelData(0)
+      const amp = 0.22 * fxVolume
       for (let i = 0; i < length; i++) {
         const env = 1 - i / length
-        data[i] = Math.sin((i / rate) * freq * Math.PI * 2) * 0.22 * env
+        data[i] = Math.sin((i / rate) * freq * Math.PI * 2) * amp * env
       }
       const source = ctx.createBufferSource()
       source.buffer = buffer
       source.connect(ctx.destination)
       source.start()
     },
+    setFxVolume(v) { fxVolume = Math.max(0, Math.min(1, v)) },
     decode(data) {
       return new Promise((resolve, reject) => {
         if (!ctx.decodeAudioData) {
@@ -212,6 +312,7 @@ export function createMiniHost(kind: HostKind, api: MiniApi, allowGlExtensions: 
   let launched = false
   let bootUrl = ''
   let web: WebAudioHost | null | undefined
+  const musicVoice = createMiniMusic(api)
   let bootVideo: { play?: () => void; stop?: () => void; destroy?: () => void; width?: number; height?: number } | null = null
   return {
     kind,
@@ -230,6 +331,7 @@ export function createMiniHost(kind: HostKind, api: MiniApi, allowGlExtensions: 
       canvas.height = height
       return canvas
     },
+    bootReady(sinceBoot: number) { return sinceBoot >= 1200 },
     openBootVideo(url) {
       const sys = api.getSystemInfoSync?.() ?? info
       if (bootVideo && bootUrl === url) {
@@ -271,6 +373,7 @@ export function createMiniHost(kind: HostKind, api: MiniApi, allowGlExtensions: 
       api.onTouchStart?.((e) => {
         if (web === undefined) web = wrapWeb(api)
         web?.resume()
+        musicVoice.resume()
         for (const t of e.touches) start(map(t))
       })
       api.onTouchMove?.((e) => { for (const t of e.touches) move(map(t)) })
@@ -297,9 +400,11 @@ export function createMiniHost(kind: HostKind, api: MiniApi, allowGlExtensions: 
     storageSet(key, value) { api.setStorageSync?.(key, value) },
     storageRemove(key) { api.removeStorageSync?.(key) },
     innerAudio: () => wrapInner(api),
+    music: () => musicVoice,
     webAudio() {
       if (web !== undefined) return web
       web = wrapWeb(api)
+      web?.resume()
       return web
     },
     login() {

@@ -75,7 +75,7 @@ export const BANKS: BankItem[] = [
   { name: 'Music6_4', label: '蓝色沙漠', bytes: 1016109, group: 'music', src: '/audio/Music6_4.mp3' },
   { name: 'Music6_5', label: '林息仙迹', bytes: 1018413, group: 'music', src: '/audio/Music6_5.mp3' },
   { name: 'Music6_6', label: '无际之海', bytes: 998829, group: 'music', src: '/audio/Music6_6.mp3' },
-  { name: 'Music6_7', label: '真空圣境', bytes: 0, group: 'music' },
+  { name: 'Music6_7', label: '真空圣境', bytes: 1024557, group: 'music', src: '/audio/Music6_7.mp3' },
   { name: 'Ocean_Calm_Quad', label: '平静海面', bytes: 1446381, group: 'zone', src: CLIPS.Ocean_Calm_Quad },
   { name: 'River_Quad', label: '河流', bytes: 1449549, group: 'zone', src: '/audio/River_Quad.mp3' },
   { name: 'River_ADD', label: '溪流', bytes: 1445805, group: 'zone', src: '/audio/River_ADD.mp3' },

@@ -6,7 +6,7 @@ attribute float aKind;
 attribute vec2 aUv;
 uniform mat4 uViewProj;
 uniform mat4 uModel;
-uniform mediump float uTime;
+uniform highp float uTime;
 uniform mediump float uWind;
 uniform mediump float uRain;
 uniform mediump vec3 uEye;
@@ -14,25 +14,35 @@ varying vec3 vNormal;
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 varying highp vec3 vWorld;
 varying highp vec2 vUv;
+varying highp float vRind;
+varying highp float vMask;
 #else
 varying mediump vec3 vWorld;
 varying mediump vec2 vUv;
+varying mediump float vRind;
+varying mediump float vMask;
 #endif
 varying vec3 vColor;
 varying float vKind;
+// Mali reduces sin() in a loop. Hours of clock make every blade slower.
+float wave(float x) {
+  return sin(mod(x, 6.2831853));
+}
 void main() {
+  vRind = 0.0;
+  vMask = 0.0;
   vec3 pos = aPos;
   if (aKind > 1.5 && aKind < 2.5) {
     float tip = clamp((aColor.g - 0.46) / 0.42, 0.0, 1.0);
-    float gust = sin(aPos.x * 0.07 - uTime * 0.45) * 0.5 + 0.5;
-    float flut = sin(uTime * 1.9 + aPos.x * 0.7 + aPos.z * 0.4);
+    float gust = wave(aPos.x * 0.07 - uTime * 0.45) * 0.5 + 0.5;
+    float flut = wave(uTime * 1.9 + aPos.x * 0.7 + aPos.z * 0.4);
     float w = flut * tip * uWind * (0.07 + gust * 0.12);
     pos.x += w * 0.92;
     pos.z += w * 0.39;
   }
   if (aKind > 5.5 && aKind < 6.5 && aUv.y > 0.02) {
     float tip = aUv.y * aUv.y;
-    float gust = sin(uTime * (0.95 + uWind * 0.4) + aPos.x * 0.7 + aPos.z * 0.45);
+    float gust = wave(uTime * (0.95 + uWind * 0.4) + aPos.x * 0.7 + aPos.z * 0.45);
     float w = gust * tip * uWind * 0.08;
     pos.x += w * 0.92;
     pos.z += w * 0.39;
@@ -94,7 +104,7 @@ void main() {
     return;
   }
   if (aKind > 7.5 && aKind < 8.5) {
-    pos.x += sin(uTime * 2.2 + aPos.y * 1.4) * 0.03;
+    pos.x += wave(uTime * 2.2 + aPos.y * 1.4) * 0.03;
   }
   if (aKind > 8.5 && aKind < 9.5) {
     vec3 center = (uModel * vec4(aPos, 1.0)).xyz;
@@ -157,11 +167,11 @@ void main() {
     float sy = aUv.y >= 0.0 ? 1.0 : -1.0;
     float seed = fract(sin(dot(aPos, vec3(127.1, 311.7, 74.7))) * 43758.5453);
     float high = clamp(center.y * 0.06, 0.12, 1.0);
-    float gust = 0.5 + 0.5 * sin(uTime * 1.15 + aPos.x * 0.17 + aPos.z * 0.11);
-    float sway = sin(uTime * (1.1 + seed) + seed * 30.0) * (0.04 + 0.12 * gust) * uWind * high;
+    float gust = 0.5 + 0.5 * wave(uTime * 1.15 + aPos.x * 0.17 + aPos.z * 0.11);
+    float sway = wave(uTime * (1.1 + seed) + seed * 30.0) * (0.04 + 0.12 * gust) * uWind * high;
     center.x += 0.92 * sway;
     center.z += 0.39 * sway;
-    center.y += sin(uTime * (1.7 + seed) + seed * 20.0) * (0.02 + 0.06 * gust) * uWind * high;
+    center.y += wave(uTime * (1.7 + seed) + seed * 20.0) * (0.02 + 0.06 * gust) * uWind * high;
     vec3 toCam = uEye - center;
     float dist = length(toCam);
     toCam = dist > 0.001 ? toCam / dist : vec3(0.0, 0.0, 1.0);
@@ -169,7 +179,7 @@ void main() {
     float al = length(axis);
     axis = al > 0.0001 ? axis / al : vec3(0.0, 1.0, 0.0);
     vec3 side = normalize(cross(toCam, axis));
-    float spin = (seed - 0.5) * 2.0 + sin(uTime * 3.0 + seed * 50.0) * 0.5 * uWind;
+    float spin = (seed - 0.5) * 2.0 + wave(uTime * 3.0 + seed * 50.0) * 0.5 * uWind;
     float cs = cos(spin);
     float sn = sin(spin);
     vec3 along = axis * cs + side * sn;
@@ -206,14 +216,14 @@ void main() {
     float sy = aNormal.y >= 0.0 ? 1.0 : -1.0;
     float ff = clamp(aPos.y * 0.05, 0.0, 1.0);
     float pace = 0.85 + uWind * 0.45;
-    float gust = sin(uTime * 1.15 * pace + aPos.x * 0.17 + aPos.z * 0.13);
+    float gust = wave(uTime * 1.15 * pace + aPos.x * 0.17 + aPos.z * 0.13);
     float lift = 0.35 + 0.65 * ff;
     center += vec3(0.92, -0.05, 0.39) * gust * 0.1 * uWind * lift;
     vec3 leaf = center + right * (sx * hx) + upv * (sy * hy);
-    leaf += right * sin(uTime * (2.2 + uWind) + aPos.x * 3.0) * hx * 0.03 * uWind;
+    leaf += right * wave(uTime * (2.2 + uWind) + aPos.x * 3.0) * hx * 0.03 * uWind;
     float tip = clamp(aNormal.y / max(abs(aNormal.z), 0.05), 0.0, 1.0);
     float blade = smoothstep(1.2, 2.6, hy / max(hx, 0.02));
-    float bend = sin(uTime * (1.3 + uWind * 0.7) + aPos.x * 0.8 + aPos.z * 0.5);
+    float bend = wave(uTime * (1.3 + uWind * 0.7) + aPos.x * 0.8 + aPos.z * 0.5);
     float amp = uWind * (0.045 + blade * 0.12) * tip;
     leaf.x += 0.92 * bend * amp;
     leaf.z += 0.39 * bend * amp;
@@ -239,8 +249,8 @@ void main() {
     float rise = stem ? -aUv.y : aUv.y;
     float along = stem ? clamp(aNormal.y, 0.0, 1.0) : 1.0;
     vec3 p = root + vec3(0.0, rise * along, 0.0);
-    float flut = sin(uTime * (2.1 + seedw) + seed * 6.2832);
-    float sway = sin(uTime * (1.5 + seed) + seedw * 4.0);
+    float flut = wave(uTime * (2.1 + seedw) + seed * 6.2832);
+    float sway = wave(uTime * (1.5 + seed) + seedw * 4.0);
     float amp = uWind * 0.14 * along;
     p.x += (0.92 * flut - 0.39 * sway * 0.4) * amp;
     p.z += (0.39 * flut + 0.92 * sway * 0.4) * amp;
@@ -277,6 +287,13 @@ void main() {
   vColor = aColor;
   vKind = aKind;
   vUv = aUv;
+  // Height in the high 10 bits, grid strength in the low 6. 0.4/65536 matches the actor.
+  if (aKind > 14.5 && aKind < 15.5) {
+    float e = floor((aKind - 15.0) * (65536.0 / 0.4) + 0.5);
+    float zi = floor(e / 64.0);
+    vRind = zi / 1023.0;
+    vMask = (e - zi * 64.0) / 63.0;
+  }
   gl_Position = uViewProj * world;
 }
 `
@@ -292,9 +309,13 @@ varying vec3 vNormal;
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 varying highp vec3 vWorld;
 varying highp vec2 vUv;
+varying highp float vRind;
+varying highp float vMask;
 #else
 varying mediump vec3 vWorld;
 varying mediump vec2 vUv;
+varying mediump float vRind;
+varying mediump float vMask;
 #endif
 varying vec3 vColor;
 varying float vKind;
@@ -303,12 +324,19 @@ uniform vec3 uSunColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform vec3 uEye;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+uniform highp float uTime;
+#else
 uniform float uTime;
+#endif
 uniform float uRain;
 uniform float uMist;
 uniform float uDim;
+uniform float uLook;
 uniform sampler2D uLeaf;
 uniform sampler2D uFace;
+uniform vec3 uFirePos;
+uniform float uFire;
 
 float cloudSdf(vec2 uv) {
   vec2 p = uv * 2.0 - 1.0;
@@ -407,6 +435,48 @@ void main() {
     if (!gl_FrontFacing) n = -n;
   }
   vec3 albedo = vColor;
+  if (vKind > 14.5 && vKind < 15.5) {
+    // Diamond fruitlets. uv is a unit angle, so the face fade cannot bend it.
+    // vRind is bind height. The seam of atan sits on a groove, so it does not show.
+    float span = dot(vUv, vUv);
+    if (span > 0.5 && vMask > 0.02) {
+      float inv = inversesqrt(span);
+      float s = vUv.x * inv;
+      float c = vUv.y * inv;
+      float s2 = 2.0 * s * c;
+      float c2 = c * c - s * s;
+      float s4 = 2.0 * s2 * c2;
+      float c4 = c2 * c2 - s2 * s2;
+      float s8 = 2.0 * s4 * c4;
+      float c8 = c4 * c4 - s4 * s4;
+      float sn = s8 * c2 + c8 * s2;
+      float cs = c8 * c2 - s8 * s2;
+      float kz = mod((vRind - 0.58) * 52.36, 6.2831853);
+      float sk = sin(kz);
+      float ck = cos(kz);
+      float b1 = abs(atan(sn * ck + cs * sk, cs * ck - sn * sk)) * 0.31831;
+      float b2 = abs(atan(sn * ck - cs * sk, cs * ck + sn * sk)) * 0.31831;
+      float edge = max(b1, b2);
+      float groove = smoothstep(0.74, 0.98, edge);
+      float pit = 1.0 - smoothstep(0.0, 0.08, length(vec2(b1, b2)));
+      float mask = clamp(vMask, 0.0, 1.0);
+      vec3 painted = albedo;
+      if (uLook > 1.5) {
+        float cell = floor(b1 * 8.0) + floor(b2 * 8.0) * 9.0;
+        float h = fract(sin(mod(cell, 50.0) * 0.7) * 13.0);
+        float star = step(0.86, h) * (0.55 + 0.45 * sin(uTime * 2.4 + cell));
+        painted = mix(vec3(0.08, 0.1, 0.26), vec3(1.0, 0.94, 0.7), star * (1.0 - groove));
+      } else if (uLook > 0.5) {
+        vec3 flesh = vec3(0.86, 0.18, 0.24) * mix(0.82, 1.08, 1.0 - edge);
+        painted = mix(flesh, vec3(0.98, 0.86, 0.28), pit);
+      } else {
+        vec3 seam = albedo * vec3(0.84, 0.70, 0.48);
+        painted = mix(albedo, seam, groove * 0.5);
+        painted = mix(painted, albedo * vec3(0.78, 0.62, 0.42), pit * 0.35);
+      }
+      albedo = mix(albedo, painted, mask);
+    }
+  }
   if (vKind > 15.5 && vKind < 16.5 && dot(vUv, vUv) < 2.0) {
     float sp = floor((vKind - 16.0) * 10.0 + 0.5);
     vec3 petal = vec3(0.941, 0.337, 0.180);
@@ -524,6 +594,17 @@ void main() {
     float line = (1.0 - smoothstep(0.0, 0.06, abs(depth - 0.015))) * step(0.42, waterVnoise(wpos * 0.55 + 9.1));
     col = mix(col, vec3(0.82, 0.94, 1.0), line * 0.55);
   }
+  if (uFire > 0.001 && (vKind < 2.5 || (vKind > 5.5 && vKind < 16.5) || vKind > 17.5)) {
+    vec3 toF = uFirePos - vWorld;
+    float fd = length(toF);
+    float atten = clamp(1.0 - fd * (1.0 / 14.0), 0.0, 1.0);
+    atten *= atten;
+    vec3 ldir = toF / max(fd, 0.001);
+    float wrap = clamp(dot(n, ldir) * 0.65 + 0.35, 0.0, 1.0);
+    float flick = 0.94 + 0.06 * sin(mod(uTime * 9.0, 6.2831853));
+    vec3 surface = (vKind > 0.5 && vKind < 1.5) ? col : albedo;
+    col += surface * vec3(1.0, 0.42, 0.08) * wrap * atten * uFire * flick * 1.15;
+  }
   float dist = length(vWorld - uEye);
   float fog = 1.0 - exp(-uFogDensity * dist);
   if (uMist > 0.02) {
@@ -557,10 +638,20 @@ uniform vec3 uForward;
 uniform float uAspect;
 uniform float uTan;
 uniform vec3 uSunDir;
+uniform float uSunEl;
+uniform vec3 uMoonDir;
+uniform float uMoonEl;
+uniform vec2 uMoonLit;
+uniform float uMoonCos;
 uniform float uNight;
 uniform float uRain;
-uniform float uTime;
-uniform float uWind;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+uniform highp float uDrift;
+uniform highp float uLift;
+#else
+uniform float uDrift;
+uniform float uLift;
+#endif
 uniform float uMist;
 uniform float uFlash;
 uniform vec3 uZen;
@@ -595,22 +686,28 @@ float hash(vec2 p) {
   return fract(u * 7.0 + v * 3.0 + u * v);
 #endif
 }
-float noise(vec2 p) {
+// Value noise that repeats on x every period cells. period must stay a whole number.
+// atan(z, x) jumps by 2π on the -X meridian, so a plain fbm sample splits the sky there.
+float noiseRing(vec2 p, float period) {
   vec2 i = floor(p);
   vec2 f = fract(p);
   f = f * f * (3.0 - 2.0 * f);
-  float a = hash(i);
-  float b = hash(i + vec2(1.0, 0.0));
-  float c = hash(i + vec2(0.0, 1.0));
-  float d = hash(i + vec2(1.0, 1.0));
+  float x0 = mod(i.x + period, period);
+  float x1 = mod(i.x + 1.0 + period, period);
+  float a = hash(vec2(x0, i.y));
+  float b = hash(vec2(x1, i.y));
+  float c = hash(vec2(x0, i.y + 1.0));
+  float d = hash(vec2(x1, i.y + 1.0));
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
-float fbm(vec2 p) {
+float fbmRing(vec2 p) {
   float s = 0.0;
   float a = 0.5;
+  float period = 7.0;
   for (int i = 0; i < 3; i++) {
-    s += a * noise(p);
-    p = p * 2.03 + vec2(17.1, 9.3);
+    s += a * noiseRing(p, period);
+    p = p * 2.0 + vec2(17.1, 9.3);
+    period *= 2.0;
     a *= 0.5;
   }
   return s * 1.07;
@@ -625,21 +722,24 @@ void main() {
   vec3 c = mix(uHor, uLow, smoothstep(0.0, 0.21, e));
   c = mix(c, uMid, smoothstep(0.12, 0.52, e));
   c = mix(c, uZen, smoothstep(0.34, 1.12, e));
-  float dAz = az - atan(sun.z, sun.x);
-  dAz = mod(dAz + 3.14159, 6.28318) - 3.14159;
+  // Horizon angle between the ray and the sun. atan(az - sunAz) splits on the -X
+  // meridian, and sunset sits 4° off that cut, so the wash was sliced in half.
+  vec2 rayH = dir.xz;
+  vec2 sunH = sun.xz;
+  float rayN = length(rayH);
+  float sunN = length(sunH);
+  vec2 rayU = rayH / max(rayN, 1e-4);
+  vec2 sunU = sunH / max(sunN, 1e-4);
+  float dAz = atan(abs(rayU.x * sunU.y - rayU.y * sunU.x), dot(rayU, sunU));
+  dAz *= step(1e-4, rayN) * step(1e-4, sunN);
   float g = exp(-(dAz * dAz) / 1.1) * exp(-e / 0.27);
-  c = mix(c, uHorSun, g * 0.9);
-  float antiD = abs(dAz) - 3.14159;
+  c = mix(c, uHorSun, g * 0.9 * smoothstep(-0.35, 0.05, uSunEl));
+  float antiD = dAz - 3.14159265;
   float anti = exp(-(antiD * antiD) / 1.6) * exp(-e / 0.35);
   c = mix(c, mix(uLow, uMid, 0.5), anti * 0.35);
-  float ang = acos(clamp(dot(dir, sun), -1.0, 1.0));
-  float disc = smoothstep(0.036, 0.026, ang);
-  float glow = exp(-ang * ang / 0.02) * 0.55 + exp(-ang / 0.16) * 0.25;
-  float discAmt = (1.0 - uNight) * (1.0 - uRain) * smoothstep(-0.2, 0.18, sun.y);
-  c = mix(c, uDisc, clamp(disc + glow, 0.0, 1.0) * discAmt);
   float cover = clamp(max(uCover, 0.42), 0.0, 1.0);
-  float drift = uTime * (0.012 + uWind * 0.008);
-  float n = fbm(vec2(az * 1.15 + drift, el * 2.4 + uTime * 0.004) + vec2(4.0, 1.7));
+  // Drift is wrapped to one repeat of every octave, so the hash stays a small angle.
+  float n = fbmRing(vec2(az * (7.0 / 6.2831853) + uDrift, el * 2.4 + uLift) + vec2(4.0, 1.7));
   float band = smoothstep(0.02, 0.16, e) * (1.0 - smoothstep(0.95, 1.35, e));
   float cloud = smoothstep(mix(0.58, 0.36, cover), mix(0.72, 0.5, cover), n) * band;
   vec3 cc = mix(uCloudSh, uCloudMid, 0.55);
@@ -648,14 +748,102 @@ void main() {
   // The camera looks down, so the old 0.18 cutoff left stars in a sliver
   // under the top edge. Phones cover that edge; draw them through the night sky.
   if (uNight > 0.45 && e > 0.05) {
-    vec2 sp = vec2(az, el) * 42.0;
-    float star = step(0.972, hash(floor(sp))) * (1.0 - smoothstep(0.04, 0.28, length(fract(sp) - 0.5)));
+    // 264 cells around the sky, so a star cell is not cut by the ±π meridian.
+    float starTurn = 264.0;
+    vec2 sp = vec2(az * (starTurn / 6.2831853), el * 42.0);
+    vec2 cell = vec2(mod(floor(sp.x) + starTurn, starTurn), floor(sp.y));
+    float star = step(0.972, hash(cell)) * (1.0 - smoothstep(0.04, 0.28, length(fract(sp) - 0.5)));
     c = mix(c, vec3(1.0, 0.96, 0.82), star * uNight * (1.0 - cloud) * (1.0 - uRain));
   }
   c = mix(uHor, c, smoothstep(-0.06, 0.08, el));
+  // Same solid disc and halo as the old dusk sun. The core fills in; the halo stays outside it.
+  float ang = acos(clamp(dot(dir, sun), -1.0, 1.0));
+  float disc = smoothstep(0.036, 0.026, ang);
+  float glow = exp(-ang * ang / 0.02) * 0.55 + exp(-ang / 0.16) * 0.25;
+  float discAmt = (1.0 - uRain) * smoothstep(-0.015, 0.05, uSunEl);
+  c = mix(c, vec3(1.0, 0.945, 0.722), clamp(disc + glow, 0.0, 1.0) * discAmt);
+  vec3 moonV = uMoonDir;
+  float moonLen = length(moonV);
+  moonV = moonLen > 0.2 ? moonV / moonLen : vec3(0.0, -1.0, 0.0);
+  float mang = acos(clamp(dot(dir, moonV), -1.0, 1.0));
+  float moonDisc = smoothstep(0.036, 0.026, mang);
+  vec3 right = cross(vec3(0.0, 1.0, 0.0), moonV);
+  float rightLen = length(right);
+  right = rightLen > 1e-3 ? right / rightLen : vec3(1.0, 0.0, 0.0);
+  vec3 moonUp = cross(moonV, right);
+  vec3 rel = dir - moonV * dot(dir, moonV);
+  vec2 uv = vec2(dot(rel, right), dot(rel, moonUp)) / 0.031;
+  float z = sqrt(max(0.0, 1.0 - min(dot(uv, uv), 1.0)));
+  float cosE = clamp(uMoonCos, -1.0, 1.0);
+  float sinE = sqrt(max(0.0, 1.0 - cosE * cosE));
+  float litLen = length(uMoonLit);
+  vec2 litDir = litLen > 1e-4 ? uMoonLit / litLen : vec2(1.0, 0.0);
+  float ndotl = dot(uv, litDir) * sinE - z * cosE;
+  float lit = smoothstep(0.0, 0.08, ndotl);
+  float apart = smoothstep(0.09, 0.22, acos(cosE));
+  float night = clamp(uNight, 0.0, 1.0);
+  float moonShow = (1.0 - uRain) * smoothstep(-0.02, 0.05, uMoonEl) * apart;
+  float moonMask = moonDisc * moonShow;
+  vec3 moonCol = mix(vec3(0.16, 0.17, 0.24), vec3(0.93, 0.94, 0.90), mix(1.0, lit, night));
+  c = mix(c, moonCol, mix(lit, 1.0, night) * moonMask);
   c = mix(c, c * vec3(0.55, 0.6, 0.68), uRain * 0.72);
   c = mix(c, mix(uHor, vec3(0.78, 0.82, 0.86), 0.45), uMist * (1.0 - smoothstep(0.02, 0.55, e)) * 0.65);
   c += vec3(0.45, 0.52, 0.66) * uFlash;
   gl_FragColor = vec4(c, 1.0);
+}
+`
+
+/** Y-billboard is built on the CPU. This pass is the UnityFire smooth flame. */
+export const FIRE_VS = `
+attribute vec3 aPos;
+attribute vec2 aUv;
+uniform mat4 uViewProj;
+varying vec2 vUv;
+void main() {
+  vUv = aUv;
+  gl_Position = uViewProj * vec4(aPos, 1.0);
+}
+`
+
+export const FIRE_FS = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uShape;
+uniform sampler2D uNoise;
+uniform sampler2D uMask;
+uniform sampler2D uGrad;
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+uniform highp float uTime;
+#else
+uniform float uTime;
+#endif
+uniform float uFactor;
+void main() {
+  vec2 uv = vUv;
+  float bottomMask = texture2D(uMask, uv).r;
+  float scroll = mod(uTime * 0.8, 1.0);
+  vec2 noiseUV = vec2(uv.x, uv.y * 0.6 - scroll);
+  vec2 nOff = vec2(0.012, 0.012);
+  float noise = (
+    texture2D(uNoise, noiseUV).r +
+    texture2D(uNoise, noiseUV + nOff).r +
+    texture2D(uNoise, noiseUV - nOff).r) * 0.333333;
+  noise -= 0.5;
+  float discontinue = texture2D(uNoise, uv).r;
+  discontinue = mix(discontinue, 0.0, bottomMask);
+  float displace = noise * discontinue * 2.125;
+  vec4 shapeColor = texture2D(uShape, vec2(uv.x + displace, uv.y));
+  float gray = 0.3 * shapeColor.r + 0.6 * shapeColor.g + 0.1 * shapeColor.b;
+  float colorU = clamp(gray * 1.15 + 0.12, 0.0, 1.0);
+  vec4 finalColor = texture2D(uGrad, vec2(colorU, uv.y));
+  float colorScale = mix(0.1875, 1.25, uFactor);
+  finalColor.rgb *= 1.5 * colorScale;
+  float alpha = smoothstep(0.02, 0.55, gray);
+  alpha = clamp(alpha * 0.95, 0.0, 1.0) * 1.05 * uFactor;
+  float edge = smoothstep(0.0, 0.06, uv.x) * smoothstep(0.0, 0.06, 1.0 - uv.x)
+    * smoothstep(0.0, 0.04, uv.y) * smoothstep(0.0, 0.08, 1.0 - uv.y);
+  alpha *= edge;
+  if (alpha < 0.02) discard;
+  gl_FragColor = vec4(finalColor.rgb * alpha, alpha);
 }
 `

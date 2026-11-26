@@ -6,6 +6,7 @@ import {
   fbm2, FOREST_POS, forestAmount, height, HILL_POS, pathDist, pondRadius, SCENE_SPAWN,
   shoreDist, smoothstep, TERRAIN_SIZE, valueNoise2, type SceneKind,
 } from './island'
+import { campfireClear, campfireLogs } from './campfire'
 import {
   Builder, emptyMesh, hash, KIND_PROP, KIND_RAIN, type MeshData, type RGB,
 } from './mesh'
@@ -333,6 +334,7 @@ function zoneDensity(x: number, z: number): number {
 }
 
 function tuftWeight(x: number, z: number): number {
+  if (campfireClear(x, z)) return 0
   const d = zoneDensity(x, z)
   if (d <= 0 || height(x, z) < 0.06) return 0
   if (onJetty(x, z)) return 0
@@ -403,6 +405,7 @@ function grassMeshes(): MeshData[] {
 
 function flowerWeights(x: number, z: number, out: number[]): number {
   out[0] = out[1] = out[2] = out[3] = out[4] = 0
+  if (campfireClear(x, z)) return 0
   if (Math.hypot(x, z) > 250) return 0
   const sd = Math.hypot(x, z) > 86 ? 99 : shoreDist(x, z)
   if (sd < 0.6 || height(x, z) < 0.08) return 0
@@ -1304,6 +1307,7 @@ export function buildWorld(_scene: SceneKind = 'meadow'): WorldMeshes {
     ...treeMeshes(),
     ridgeMesh(),
     jettyMesh(),
+    campfireLogs(),
   ]
   return { pieces, rain: rainMesh(), scene: 'meadow' }
 }

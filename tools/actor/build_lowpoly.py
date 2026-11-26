@@ -191,15 +191,24 @@ def add_ellipsoid(build, center, radii, segs, rings, color):
     return island
 
 
-def add_mouth_oval(build, center, rx, rz, segs, color):
-    """A flat vertical oval on the face. Normal points toward -Y, so it does not bulge out."""
+def add_mouth_circle(build, tree, center, radius, segs, color):
+    """A small circle on the face. XZ stays circular; Y follows the shell so the belly does not cover it."""
     island = build.alloc_island()
     dark = tuple(c * 0.55 for c in color)
-    hub = build.vert(center, dark)
+
+    def place(x, z):
+        hit = tree.ray_cast(Vector((x, -0.55, z)), Vector((0.0, 1.0, 0.0)))
+        co = hit[0].copy() if hit[0] is not None else Vector((x, center.y, z))
+        co.x = x
+        co.z = z
+        co.y -= 0.0015
+        return co
+
+    hub = build.vert(place(center.x, center.z), dark)
     ring = []
     for j in range(segs):
         ang = math.tau * j / segs
-        co = center + Vector((math.cos(ang) * rx, 0.0, math.sin(ang) * rz))
+        co = place(center.x + math.cos(ang) * radius, center.z + math.sin(ang) * radius)
         ring.append(build.vert(co, color))
     for j in range(segs):
         j2 = (j + 1) % segs
@@ -1090,12 +1099,11 @@ def main():
     if parts["mouth"]:
         lo, hi = bounds(parts["mouth"])
         zmid = (lo.z + hi.z) * 0.5
-        # Drop the old bump. Plant the oval on the egg so every rim vert stays within 2 mm.
+        # Drop the old bump. Plant a small circle on the egg so every rim vert stays within 2 mm.
         tree = BVHTree.FromBMesh(build.bm)
         hit = tree.find_nearest(Vector(((lo.x + hi.x) * 0.5, -0.45, zmid)))
         center = hit[0].copy() if hit[0] is not None else Vector((0.0, lo.y, zmid))
-        center.y -= 0.0006
-        add_mouth_oval(build, center, 0.011, 0.02, 16, MOUTH)
+        add_mouth_circle(build, tree, center, 0.013, 16, MOUTH)
     # Close the egg, eyes and feet before the crown and arms bring their own normals.
     build.bm.normal_update()
     bmesh.ops.recalc_face_normals(build.bm, faces=list(build.bm.faces))

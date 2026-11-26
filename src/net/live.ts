@@ -12,6 +12,8 @@ export interface LiveSky {
   label: string
   temp: number
   clock: ClockSample
+  lat: number
+  lon: number
 }
 
 interface Place {
@@ -73,6 +75,12 @@ const SNOW_MID = new Set([227, 329, 332, 371])
 const SNOW_HEAVY = new Set([230, 335, 338, 392, 395])
 const SLEET = new Set([182, 185, 281, 284, 311, 314, 317, 320, 350, 362, 365, 374, 377])
 
+/** Until a fix arrives, latitude is the Yangtze delta and longitude follows the device zone. */
+export function deviceGeo(): { lat: number; lon: number } {
+  const lon = Math.max(-180, Math.min(180, -new Date().getTimezoneOffset() / 4))
+  return { lat: 31.23, lon }
+}
+
 export function deviceClock(now: number): ClockSample {
   const d = new Date(now)
   return {
@@ -81,7 +89,7 @@ export function deviceClock(now: number): ClockSample {
   }
 }
 
-export function readClock(sample: ClockSample, now: number): { hours: number; text: string } {
+export function readClock(sample: ClockSample, now: number): { hours: number; text: string; day: string } {
   const d = new Date(sample.wallMs + (now - sample.sampledAt))
   const h = d.getUTCHours()
   const m = d.getUTCMinutes()
@@ -89,6 +97,7 @@ export function readClock(sample: ClockSample, now: number): { hours: number; te
   return {
     hours: h + m / 60 + s / 3600,
     text: `${pad(h)}:${pad(m)}`,
+    day: `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`,
   }
 }
 
@@ -114,7 +123,8 @@ export async function fetchLiveSky(now = Date.now()): Promise<LiveSky> {
     ? weatherRes.value
     : { place: '', weather: 'clear' as const, level: 1, label: '', temp: Number.NaN }
   const place = placeRes.status === 'fulfilled' && placeRes.value ? placeRes.value : weather.place
-  return { clock, ...weather, place }
+  const geo = where ?? deviceGeo()
+  return { clock, ...weather, place, lat: geo.lat, lon: geo.lon }
 }
 
 export function mapWeather(code: number, windKmh: number, cloud: number): { weather: SkyWeather; level: number; label: string } {

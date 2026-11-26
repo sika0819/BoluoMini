@@ -11,6 +11,8 @@ export interface MeshData {
   reflect?: boolean
   /** Positions change every frame. The renderer reuploads the vertex buffer. */
   dynamic?: boolean
+  /** Noise-fire card. Drawn with the campfire pass, not the lit shader. */
+  flame?: boolean
 }
 
 export type RGB = [number, number, number]
@@ -22,9 +24,12 @@ export const KIND_RAIN = 3
 export const KIND_FIRE = 4
 export const KIND_CLOUD = 5
 export const KIND_PROP = 6
-/** Player pineapple. Flat cartoon vertex color on the low-poly mesh. */
+/**
+ * Player pineapple. Flat cartoon vertex color on the low-poly mesh.
+ * On the rind, uv is the unit axis angle. Kind packs height and the
+ * grid strength, so a fade cannot bend the scales.
+ */
 export const KIND_ACTOR = 15
-export const KIND_WINDOW = 7
 export const KIND_FALLS = 8
 /**
  * Bark stroke. Normal is the surface. Color is the grain direction, not a pigment.
@@ -33,8 +38,6 @@ export const KIND_FALLS = 8
  */
 export const KIND_BARK = 9
 export const KIND_ROCK = 10
-/** Pineapple house — samples boluo1 BaseColor/Normal with authored UVs. */
-export const KIND_BOLUO = 11
 /** Dock — samples dock oil albedo with authored UVs. */
 export const KIND_DOCK = 12
 /** Wonderland leaf clump. Normal packs the billboard corner and size; UV is the leaf atlas. */

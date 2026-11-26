@@ -26,6 +26,27 @@ export interface InnerVoice {
   stop(): void
 }
 
+/**
+ * Playlist music. A media element, not a WebAudio gain, so its volume
+ * cannot overwrite rain, wind, grass, or other effects.
+ */
+export interface MusicVoice {
+  /** Empty url stops. `restart` plays the same url again from the beginning. */
+  load(url: string, restart: boolean): void
+  /** Buffer a song during the loading page. Stays silent until load() or resume(). */
+  warm(url: string): void
+  setVolume(v: number): void
+  /** Seconds. 0 until the file reports a duration. */
+  duration(): number
+  /** Seconds into the file. This is the clock the beat grid follows. */
+  position(): number
+  /** True once playback has actually begun for the current url. */
+  started(): boolean
+  stop(): void
+  pause(): void
+  resume(): void
+}
+
 export interface SpatialVoice {
   setPosition(x: number, y: number, z: number): void
   setGain(v: number): void
@@ -60,8 +81,10 @@ export interface WebAudioHost {
   ): SpatialVoice
   decode(data: ArrayBuffer): Promise<AudioClip>
   setListener(x: number, y: number, z: number, fx: number, fy: number, fz: number): void
-  /** Short non-spatial tone. Hit and miss feedback. */
+  /** Short non-spatial tone. Hit and miss feedback. Follows the effect volume. */
   beep(freq: number, seconds: number): void
+  /** User sound-effect volume, 0–1. Scales beeps and is stored for later tones. */
+  setFxVolume(v: number): void
   /** False while the context is waiting for a user gesture. */
   running(): boolean
   suspend(): void
@@ -93,6 +116,8 @@ export interface Host {
   storageSet(key: string, value: string): void
   storageRemove(key: string): void
   innerAudio(): InnerVoice
+  /** One playlist player for the life of the host. */
+  music(): MusicVoice
   webAudio(): WebAudioHost | null
   login(): Promise<PlatformCode | null>
   onHide(cb: () => void): void
@@ -111,4 +136,9 @@ export interface Host {
   uiCanvas(width: number, height: number): HostCanvas
   openBootVideo(url: string): void
   closeBootVideo(): void
+  /**
+   * Browser keeps the boot video up until it has actually played, or gives up.
+   * Mini hosts are ready as soon as the caller asks.
+   */
+  bootReady(sinceBoot: number): boolean
 }

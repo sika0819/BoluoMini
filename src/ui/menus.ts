@@ -1,15 +1,28 @@
 import { currentUser } from '../net/account'
-import { ALBUMS, BANKS, PRESETS, TRACKS } from '../game/catalog'
+import { ALBUMS, BANKS, TRACKS } from '../game/catalog'
+import { OUTFITS } from '../game/outfits'
 import type { DownloadSnapshot } from '../game/download'
 import { drawEqualizer } from './equalizer'
 import { drawHudSvg } from './hudSvg'
 import { sliderDotSvg } from './menuSvg'
 import { ProfilePane } from './profile'
-import type { UiAction, UiInput } from './shell'
+import type { PlayMode, UiAction, UiInput } from './shell'
 
 const W = 1125
 const H = 2436
 const SLIDE_MS = 320
+const SWATCH: Record<string, string> = {
+  leaf: '#F6D5DE',
+  berry: '#F3A3A8',
+  star: '#2C3358',
+  walk: '#C9D7B8',
+  xmas: '#E25B5B',
+  year: '#E24B3A',
+  moon: '#E4E7F4',
+  rain: '#8FCBD4',
+  honey: '#F6D56A',
+  snow: '#D5E4F2',
+}
 const INK = '#181819'
 const MUTED = '#878791'
 const DESC = '#BAC8C3'
@@ -19,9 +32,19 @@ const LEVEL_NAME = ['关闭', '小', '中', '大']
 const WEATHER_KIND = ['wind', 'rain', 'fog'] as const
 const TRAVEL = 663
 const ROW_H = 144
+const ALBUM_X = 168.5
+const ALBUM_Y = 963
+const ALBUM_W = 788
+const ALBUM_H = 101
+const ALBUM_GAP = 40
+const ALBUM_COPIES = 3
+const TRACK_GAP = 160
+const TRACK_SPEED = 80
+const TRACK_PAUSE = 3
+const TRACK_SPACE = '2.025px'
 
 type Kind = (typeof WEATHER_KIND)[number]
-type Panel = 'weather' | 'music' | 'volume' | 'preset' | 'timer' | 'profile'
+type Panel = 'weather' | 'music' | 'volume' | 'preset' | 'timer' | 'profile' | 'settings'
 type Dialog = 'logout' | 'save' | 'timer-end' | 'cancel-account' | 'guest'
 type Anim = { from: number; to: number; at: number }
 type Spring = { v: number; vel: number; to: number }
@@ -33,6 +56,15 @@ const TIMER_KNOB_DRAG_Y = -276
 const TIMER_KNOB_DRAG_SCALE = 1.66
 const TIMER_SPRING_K = 400
 const TIMER_SPRING_D = 0.82
+/** Preset strip. Same gesture as CustomSRP PresetForm: 1:1 under the finger, coast only after release. */
+const PRESET_SLOP = 8
+const PRESET_COAST_DECEL = 3200
+const PRESET_COAST_SCALE = 0.85
+const PRESET_COAST_START = 140
+const PRESET_COAST_STOP = 35
+const PRESET_COAST_MAX = 2000
+const PRESET_VEL_WINDOW = 0.07
+const PRESET_VEL_MIN_DT = 0.012
 
 interface Hit {
   x: number
@@ -61,8 +93,11 @@ export class Menus {
   private moved = 0
   private drag: '' | 'knob' | 'volume' | 'album' | 'list' | 'preset' | 'timer' | 'profile' = ''
   private dragStartX = 0
+  private dragStartY = 0
   private dragStartValue = 0
   private volumeKey: 'music' | 'fx' = 'music'
+  /** The channel that is not being dragged, frozen when the drag starts. */
+  private volumeHold = 0.8
   private weatherTab = 0
   private knobMargin = LEVEL_ML[0]
   private knobLevel = 0
@@ -71,13 +106,32 @@ export class Menus {
   private albumX = 0
   private albumDrag = false
   private albumSnap: Anim | null = null
-  private mode = 1
+  /** Triple-copy strip. Widths stay frozen while a drag is in progress. */
+  private albumPack: { left: number[]; width: number[]; copy: number; highlight: number } | null = null
+  /** A song title in the open list is wider than its mask, so the marquee has to keep moving. */
+  private titleScroll = false
+  private titleAlbum = -1
+  private titleEpoch = 0
+  private mode: PlayMode = 'single'
   private listY = 0
   private listDrag = false
   private presetX = 0
+  /** Coast speed after release. Stays 0 while the finger is down. */
   private presetV = 0
   private presetDrag = false
+  private presetVelX = 0
+  private presetVelAt = 0
+  private presetSampleV = 0
+  private presetCoastAt = 0
+  /** Card open for a look, before it is paid for. */
+  private dressId = ''
+  private payId = ''
+  private payAt = 0
+  private queued: UiAction | null = null
   private heard = new Set<string>()
+  /** Tapped row, drawn as playing until playback input arrives. */
+  private picked = ''
+  private pickedAt = 0
   private timerLive = false
   private timerFill = 0
   private timerPhase: 'idle' | 'drag' | 'settle' = 'idle'
@@ -115,7 +169,16 @@ export class Menus {
     if (this.timerPhase !== 'idle') return true
     if (this.timerMotionLive()) return true
     if (this.panel === 'profile' && this.profile.busy()) return true
+    if (this.picked) return true
+    if (this.panel === 'music' && (this.titleScroll || this.input?.playing)) return true
+    if (this.payAt > this.now) return true
     return false
+  }
+
+  takeQueued(): UiAction | null {
+    const action = this.queued
+    this.queued = null
+    return action
   }
 
   paintKey(): string {
@@ -129,10 +192,13 @@ export class Menus {
     return [
       this.panel ?? '', this.dialog ?? '', this.forceAgreement ? 1 : 0, banks.dialog, spriteRev,
       this.profile.key(), Math.round(this.listY), this.album, Math.round(this.albumX),
-      Math.round(this.presetX), this.knobLevel, this.mode, this.weatherTab, this.input?.live ? 1 : 0,
+      Math.round(this.presetX), this.dressId, this.payId, this.payAt > this.now ? 1 : 0,
+      this.input?.outfitOwned ?? '', this.input?.outfitWorn ?? '',
+      this.knobLevel, this.input?.playMode ?? this.mode, this.weatherTab,
+      this.input?.live ? 1 : 0, this.input?.tour ? 1 : 0,
       this.timerFill.toFixed(2), this.timerPhase, this.timerLive ? 1 : 0,
       Math.round(this.knobX.v), Math.round(this.knobY.v), this.knobS.v.toFixed(2),
-      this.revealText, this.rollText, progress,
+      this.revealText, this.rollText, this.picked, progress,
     ].join(',')
   }
 
@@ -152,12 +218,30 @@ export class Menus {
   sync(input: UiInput): void {
     this.input = input
     this.now = input.now
+    if (this.picked) {
+      const label = TRACKS.find((track) => track.name === this.picked)?.label
+      const live = !!label && input.playing && input.trackName === label
+      if (live) this.heard.add(this.picked)
+      if (live || this.now - this.pickedAt > 800) this.picked = ''
+    }
     this.tickKnob()
     this.tickCoast()
     this.tickSnap()
     if (this.panelClosing && this.offset(this.panelAnim) > 2400) {
+      if (this.panel === 'preset') this.queue({ type: 'outfit-clear' })
       this.panel = null
       this.panelClosing = false
+      this.dressId = ''
+      this.payId = ''
+      this.payAt = 0
+    }
+    if (this.payAt > 0 && this.payId && this.now >= this.payAt) {
+      const id = this.payId
+      this.payAt = 0
+      this.payId = ''
+      this.dressId = ''
+      this.toast('购买成功')
+      this.queue({ type: 'outfit-buy', id })
     }
     if (this.modalClosing && this.offset(this.modalAnim) > 2400) {
       this.dialog = null
@@ -173,6 +257,10 @@ export class Menus {
     this.tickTimer()
     this.profile.sync(input.now)
     if (this.panel !== 'profile' || this.panelClosing) this.profile.detach()
+    if (this.panel !== 'music') {
+      this.titleScroll = false
+      this.titleAlbum = -1
+    }
   }
 
   toast(text: string, ms = 1600): void {
@@ -180,8 +268,12 @@ export class Menus {
     this.toastUntil = this.now + ms
   }
 
+  private queue(action: UiAction): void {
+    this.queued = action
+  }
+
   open(panel: Panel): void {
-    if (panel === 'preset') return
+    if (this.panel === 'preset' && panel !== 'preset') this.queue({ type: 'outfit-clear' })
     if (panel === 'profile') {
       const user = currentUser()
       if (!user || user.guest) {
@@ -194,6 +286,7 @@ export class Menus {
     this.panelAnim = { from: H, to: 0, at: this.now }
     if (panel === 'weather') this.alignWeather()
     if (panel === 'music') {
+      this.focusPlayingAlbum()
       this.centerAlbum(false)
       primePlaying()
     }
@@ -245,8 +338,9 @@ export class Menus {
         return { consumed: true, action: this.dismissTop() }
       }
       if (this.downHit === 'knob') this.beginKnob(x)
-      else if (this.downHit === 'vm' || this.downHit === 'vf') this.beginVolume(this.downHit === 'vm' ? 'music' : 'fx', x)
-      else if (this.downHit.startsWith('album')) this.beginAlbum(x)
+      else if (this.downHit === 'vm' || this.downHit === 'vm-row') this.beginVolume('music', x)
+      else if (this.downHit === 'vf' || this.downHit === 'vf-row') this.beginVolume('fx', x)
+      else if (this.downHit.startsWith('album')) this.beginAlbum(x, y)
       else if (this.downHit === 'mlist' || this.downHit.startsWith('tr')) this.beginList(y)
       else if (this.downHit === 'plist' || this.downHit.startsWith('ps')) this.beginPreset(x)
       else if (this.downHit === 'twheel') this.beginTimer(x)
@@ -264,7 +358,7 @@ export class Menus {
       this.downY = y
       if (this.drag === 'knob') this.moveKnob(x)
       if (this.drag === 'volume') return { consumed: true, action: this.moveVolume(x) }
-      if (this.drag === 'album') this.moveAlbum(x)
+      if (this.drag === 'album') this.moveAlbum(x, y)
       if (this.drag === 'list') this.moveList(y)
       if (this.drag === 'preset') this.movePreset(x)
       if (this.drag === 'timer') this.moveTimer(x)
@@ -278,7 +372,7 @@ export class Menus {
     this.downId = -1
     if (drag === 'knob') return { consumed: true, action: this.endKnob() }
     if (drag === 'album') return { consumed: true, action: this.endAlbum(same ? hit : undefined) }
-    if (drag === 'preset') return { consumed: true, action: this.endPreset(same ? hit : undefined) }
+    if (drag === 'preset') return { consumed: true, action: this.endPreset(x, same ? hit : undefined) }
     if (drag === 'timer') return { consumed: true, action: this.endTimer() }
     if (drag === 'profile' && this.profile.end()) return { consumed: true, action: null }
     if (drag === 'list' && this.listDrag) return { consumed: true, action: null }
@@ -324,8 +418,10 @@ export class Menus {
       return null
     }
     if (this.panel && !this.panelClosing) {
+      const preset = this.panel === 'preset'
       this.panelClosing = true
       this.panelAnim = { from: this.offset(this.panelAnim), to: H, at: this.now }
+      if (preset) return { type: 'outfit-clear' }
     }
     return null
   }
@@ -397,77 +493,160 @@ export class Menus {
     this.drag = 'volume'
     this.volumeKey = key
     this.dragStartX = x
-    this.dragStartValue = key === 'music' ? (this.input?.music ?? 0.8) : (this.input?.fx ?? 0.8)
+    const music = this.input?.music ?? 0.8
+    const fx = this.input?.fx ?? 0.8
+    this.dragStartValue = key === 'music' ? music : fx
+    this.volumeHold = key === 'music' ? fx : music
   }
 
   private moveVolume(x: number): UiAction | null {
-    const input = this.input
-    if (!input) return null
     const value = Math.max(0, Math.min(1, this.dragStartValue + (x - this.dragStartX) / TRAVEL))
     return {
       type: 'volume',
-      music: this.volumeKey === 'music' ? value : input.music,
-      fx: this.volumeKey === 'fx' ? value : input.fx,
+      music: this.volumeKey === 'music' ? value : this.volumeHold,
+      fx: this.volumeKey === 'fx' ? value : this.volumeHold,
     }
   }
 
-  private beginAlbum(x: number): void {
+  private beginAlbum(x: number, y: number): void {
     this.drag = 'album'
     this.albumDrag = false
     this.albumSnap = null
     this.dragStartX = x
+    this.dragStartY = y
     this.dragStartValue = this.albumX
   }
 
-  private moveAlbum(x: number): void {
-    if (Math.abs(x - this.dragStartX) > 6) this.albumDrag = true
-    if (!this.albumDrag) return
-    this.albumX = this.dragStartValue + (x - this.dragStartX)
+  private moveAlbum(x: number, y: number): void {
+    const dx = x - this.dragStartX
+    const dy = y - this.dragStartY
+    if (!this.albumDrag) {
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return
+      if (Math.abs(dy) > Math.abs(dx) * 1.5) {
+        this.drag = ''
+        return
+      }
+      this.albumLayout()
+      this.albumDrag = true
+    }
+    const next = this.normalizeAlbum(this.dragStartValue + dx)
+    this.dragStartValue = next - dx
+    this.albumX = next
   }
 
   private endAlbum(hit?: Hit): UiAction | null {
+    const count = ALBUMS.length || 1
     if (!this.albumDrag && hit && /^album\d+$/.test(hit.id)) {
-      this.album = Number(hit.id.slice(5))
-      this.listY = 0
+      const slot = Number(hit.id.slice(5))
+      const logical = ((slot % count) + count) % count
+      if (logical !== this.album) {
+        this.album = logical
+        this.listY = 0
+        this.albumPack = null
+      }
       this.centerAlbum(true)
       return null
     }
-    const count = ALBUMS.length || 1
-    let best = 0
-    let bestDist = Infinity
-    for (let i = 0; i < count; i++) {
-      const dist = Math.abs(this.albumX - this.albumTarget(i))
-      if (dist < bestDist) {
-        bestDist = dist
-        best = i
-      }
+    if (!this.albumDrag) {
+      this.centerAlbum(true)
+      return null
     }
-    this.album = best
-    this.listY = 0
+    const logical = this.slotFromOffset(this.albumX) % count
+    this.albumDrag = false
+    if (logical !== this.album) {
+      this.album = logical
+      this.listY = 0
+    }
+    this.albumPack = null
     this.centerAlbum(true)
     return null
   }
 
   private centerAlbum(animate: boolean): void {
+    this.albumDrag = false
+    const pack = this.albumLayout()
     const to = this.albumTarget(this.album)
+    let start = this.normalizeAlbum(this.albumX)
     if (!animate) {
       this.albumX = to
       this.albumSnap = null
       return
     }
-    this.albumSnap = { from: this.albumX, to, at: this.now }
+    const delta = to - start
+    if (pack.copy > 1) {
+      if (delta > pack.copy * 0.5) start += pack.copy
+      else if (delta < -pack.copy * 0.5) start -= pack.copy
+    }
+    this.albumX = start
+    if (Math.abs(to - start) < 0.5) {
+      this.albumX = to
+      this.albumSnap = null
+      return
+    }
+    this.albumSnap = { from: start, to, at: this.now }
   }
 
+  /** Content X that puts this album's middle copy on the viewport centre. */
   private albumTarget(index: number): number {
-    const widths = this.albumWidths()
-    let cursor = 0
-    for (let i = 0; i < index; i++) cursor += widths[i] + 40
-    const center = cursor + widths[index] / 2
-    return 394 - center
+    const pack = this.albumLayout()
+    const count = ALBUMS.length || 1
+    const logical = ((index % count) + count) % count
+    const slot = count + logical
+    return ALBUM_W / 2 - (pack.left[slot] + pack.width[slot] / 2)
   }
 
-  private albumWidths(): number[] {
-    return ALBUMS.map((album, i) => Math.max(48, textWidth(album.name, i === this.album ? 72 : 48)))
+  /**
+   * Three copies of every album name, packed by glyph width.
+   * Only the centred copy of the open album is measured at 72px.
+   */
+  private packAlbums(highlight: number): { left: number[]; width: number[]; copy: number; highlight: number } {
+    const count = ALBUMS.length || 1
+    const slots = count * ALBUM_COPIES
+    const left: number[] = []
+    const width: number[] = []
+    let x = 0
+    for (let i = 0; i < slots; i++) {
+      const name = ALBUMS[i % count]?.name ?? ''
+      const w = Math.max(1, textWidth(name, i === highlight ? 72 : 48))
+      left.push(x)
+      width.push(w)
+      x += w + ALBUM_GAP
+    }
+    const copy = count > 0 ? left[count] - left[0] : 0
+    return { left, width, copy, highlight }
+  }
+
+  private albumLayout(): { left: number[]; width: number[]; copy: number; highlight: number } {
+    const count = ALBUMS.length || 1
+    const highlight = count + this.album
+    if (this.albumDrag && this.albumPack) return this.albumPack
+    if (!this.albumPack || this.albumPack.highlight !== highlight) this.albumPack = this.packAlbums(highlight)
+    return this.albumPack
+  }
+
+  /** Keep the strip inside the middle-copy neighbourhood so either end has a neighbour. */
+  private normalizeAlbum(left: number): number {
+    const pack = this.albumLayout()
+    if (pack.copy < 1) return left
+    const anchor = this.albumTarget(0)
+    while (left > anchor + pack.copy * 0.5) left -= pack.copy
+    while (left < anchor - pack.copy * 1.5) left += pack.copy
+    return left
+  }
+
+  private slotFromOffset(left: number): number {
+    const pack = this.albumLayout()
+    const viewCenter = ALBUM_W / 2 - left
+    let best = 0
+    let bestDist = Infinity
+    for (let i = 0; i < pack.left.length; i++) {
+      const dist = Math.abs(pack.left[i] + pack.width[i] / 2 - viewCenter)
+      if (dist < bestDist) {
+        bestDist = dist
+        best = i
+      }
+    }
+    return best
   }
 
   private tickSnap(): void {
@@ -498,37 +677,70 @@ export class Menus {
     this.drag = 'preset'
     this.presetDrag = false
     this.presetV = 0
+    this.presetSampleV = 0
     this.dragStartX = x
     this.dragStartValue = this.presetX
-  }
-
-  private movePreset(x: number): void {
-    if (Math.abs(x - this.dragStartX) > 8) this.presetDrag = true
-    const dt = 0.016
-    const next = this.clampPreset(this.dragStartValue - (x - this.dragStartX))
-    this.presetV = (next - this.presetX) / dt
-    this.presetX = next
+    this.presetVelX = x
+    this.presetVelAt = this.presetClock()
     this.barAt = this.now
   }
 
-  private endPreset(hit?: Hit): UiAction | null {
-    const speed = Math.abs(this.presetV) < 140 ? 0 : Math.max(-2000, Math.min(2000, this.presetV * 0.85))
-    this.presetV = this.presetDrag ? speed : 0
+  private movePreset(x: number): void {
+    const dx = x - this.dragStartX
+    if (!this.presetDrag && Math.abs(dx) >= PRESET_SLOP) this.presetDrag = true
+    if (!this.presetDrag) return
+    this.samplePresetVelocity(x)
+    this.presetX = this.clampPreset(this.dragStartValue - dx)
+    this.barAt = this.now
+  }
+
+  private endPreset(x: number, hit?: Hit): UiAction | null {
+    const release = this.presetDrag ? this.finishPresetVelocity(x) : 0
+    const speed = Math.abs(release) < PRESET_COAST_START ? 0 : release * PRESET_COAST_SCALE
+    this.presetV = Math.max(-PRESET_COAST_MAX, Math.min(PRESET_COAST_MAX, speed))
+    this.presetCoastAt = this.now
     if (this.presetDrag || !hit || !hit.id.startsWith('ps')) return null
     return hit.on()
   }
 
+  private presetClock(): number {
+    return typeof performance !== 'undefined' ? performance.now() : this.now
+  }
+
+  private samplePresetVelocity(x: number): void {
+    const now = this.presetClock()
+    const window = (now - this.presetVelAt) / 1000
+    if (window < PRESET_VEL_WINDOW) return
+    this.presetSampleV = -((x - this.presetVelX) / window)
+    this.presetVelX = x
+    this.presetVelAt = now
+  }
+
+  private finishPresetVelocity(x: number): number {
+    const now = this.presetClock()
+    const window = (now - this.presetVelAt) / 1000
+    if (window >= PRESET_VEL_MIN_DT) this.presetSampleV = -((x - this.presetVelX) / window)
+    return Math.max(-PRESET_COAST_MAX, Math.min(PRESET_COAST_MAX, this.presetSampleV))
+  }
+
   private tickCoast(): void {
-    if (!this.presetV) return
-    const dt = 0.016
-    this.presetX = this.clampPreset(this.presetX + this.presetV * dt)
-    const sign = Math.sign(this.presetV)
-    this.presetV -= sign * 3200 * dt
-    if (sign * this.presetV <= 35) this.presetV = 0
+    if (!this.presetV || this.drag === 'preset') return
+    const dt = Math.max(0.001, Math.min(0.05, (this.now - this.presetCoastAt) / 1000 || 0.016))
+    this.presetCoastAt = this.now
+    const prev = this.presetV
+    const sign = Math.sign(prev)
+    this.presetV = prev - sign * PRESET_COAST_DECEL * dt
+    if (prev * this.presetV <= 0 || Math.abs(this.presetV) < PRESET_COAST_STOP) {
+      this.presetV = 0
+      return
+    }
+    const max = this.clampPreset(1e9)
+    this.presetX = this.clampPreset(this.presetX + prev * dt)
+    if (max <= 0 || this.presetX <= 0 || this.presetX >= max) this.presetV = 0
   }
 
   private clampPreset(x: number): number {
-    const n = PRESETS.length
+    const n = OUTFITS.length
     const content = 60 + n * 264 + Math.max(0, n - 1) * 36 + 60
     const max = Math.max(0, content - (1035 - 96))
     return Math.max(0, Math.min(max, x))
@@ -705,6 +917,7 @@ export class Menus {
     if (this.panel === 'volume') this.drawVolume(ctx, input)
     if (this.panel === 'preset') this.drawPreset(ctx, input)
     if (this.panel === 'timer') this.drawTimer(ctx, input)
+    if (this.panel === 'settings') this.drawSettings(ctx, input)
     if (this.panel === 'profile') this.drawProfile(ctx, ox, oy + dy, pw, ph)
     ctx.restore()
     this.shiftFrom(start, ox, oy + dy)
@@ -724,7 +937,6 @@ export class Menus {
     sheet(ctx, x, y, 1035, 735, 147)
     this.hit(x, y, 1035, 735, 'card', () => null)
     if (input.live && this.drag !== 'knob' && !this.knobAnim) this.mirrorLiveWeather(input)
-    this.liveSwitch(ctx, 912, 1679, input.live)
     const tabs = ['风', '雨', '雾']
     const origins = [364.5, 520.5, 676.5]
     tabs.forEach((label, i) => {
@@ -743,7 +955,8 @@ export class Menus {
         this.weatherTab = i
         const kind = WEATHER_KIND[i]
         const live = this.input
-        this.knobLevel = live && live.weather === kind ? Math.max(0, Math.min(3, live.weatherLevel)) : 0
+        const kept = live && live.weather === kind ? live.weatherLevel : this.knobLevel
+        this.knobLevel = Math.max(0, Math.min(3, kept))
         this.knobMargin = LEVEL_ML[this.knobLevel]
         return { type: 'weather', kind, level: this.knobLevel }
       })
@@ -798,21 +1011,61 @@ export class Menus {
     this.knobMargin = LEVEL_ML[this.knobLevel]
   }
 
-  private liveSwitch(ctx: CanvasRenderingContext2D, x: number, y: number, on: boolean): void {
-    const w = 120
-    const h = 72
+  private drawSettings(ctx: CanvasRenderingContext2D, input: UiInput): void {
+    const x = 45
+    const y = 1620
+    const w = 1035
+    const h = 696
+    sheet(ctx, x, y, w, h, 147)
+    this.hit(x, y, w, h, 'card', () => null)
     ctx.fillStyle = INK
-    ctx.font = font(36)
-    ctx.textAlign = 'right'
+    ctx.font = font(72)
+    ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText('实时', x - 18, y + h / 2)
-    round(ctx, x, y, w, h, h / 2)
+    ctx.fillText('设置', 562.5, y + 96)
+    ctx.fillStyle = DESC
+    ctx.font = font(39)
+    ctx.textBaseline = 'top'
+    wrap(ctx, '实时天气跟随当地\n导览结束会自动关上', x + 84, y + 168, 867, 52, 'center')
+    this.switchRow(ctx, x + 84, y + 320, w - 168, '实时天气', input.live, 'live', () => {
+      if (this.weatherBusy()) {
+        this.toast('天气正在改变,稍后再操作')
+        return null
+      }
+      return { type: 'live', on: !input.live }
+    })
+    this.switchRow(ctx, x + 84, y + 470, w - 168, '导览模式', input.tour, 'tour', () => {
+      return { type: 'tour', on: !input.tour }
+    })
+  }
+
+  private switchRow(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    label: string,
+    on: boolean,
+    id: string,
+    action: () => UiAction | null,
+  ): void {
+    const h = 96
+    ctx.fillStyle = INK
+    ctx.font = font(42)
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(label, x, y + h / 2)
+    const sw = 120
+    const sh = 72
+    const sx = x + w - sw
+    const sy = y + (h - sh) / 2
+    round(ctx, sx, sy, sw, sh, sh / 2)
     ctx.fillStyle = on ? GREEN : '#E6E7EB'
     ctx.fill()
     const knob = 60
     const pad = 6
-    const kx = on ? x + w - pad - knob : x + pad
-    const ky = y + (h - knob) / 2
+    const kx = on ? sx + sw - pad - knob : sx + pad
+    const ky = sy + (sh - knob) / 2
     ctx.save()
     ctx.shadowColor = 'rgba(0,0,0,0.12)'
     ctx.shadowBlur = 16
@@ -821,13 +1074,7 @@ export class Menus {
     ctx.arc(kx + knob / 2, ky + knob / 2, knob / 2, 0, Math.PI * 2)
     ctx.fill()
     ctx.restore()
-    this.hit(x - 96, y, w + 96, h, 'live', () => {
-      if (this.weatherBusy()) {
-        this.toast('天气正在改变,稍后再操作')
-        return null
-      }
-      return { type: 'live', on: !on }
-    })
+    this.hit(x, y, w, h, id, action)
   }
 
   private levelFromTrack(x: number): number {
@@ -847,29 +1094,35 @@ export class Menus {
   private drawMusic(ctx: CanvasRenderingContext2D, input: UiInput): void {
     const x = 45
     const y = 879
+    sheet(ctx, x, y, 1035, 1437, 140)
     paint(ctx, '/ui/ref/music-card.png', x, y, 1035, 1437, 140)
-    const widths = this.albumWidths()
-    this.hit(168.5, 963, 788, 101, 'album', () => null)
+    this.hit(x, y, 1035, 1437, 'card', () => null)
+    const pack = this.albumLayout()
+    const count = ALBUMS.length || 1
+    const highlight = this.albumDrag ? this.slotFromOffset(this.albumX) : count + this.album
+    this.hit(ALBUM_X, ALBUM_Y, ALBUM_W, ALBUM_H, 'album', () => null)
     ctx.save()
     ctx.beginPath()
-    ctx.rect(168.5, 963, 788, 101)
+    ctx.rect(ALBUM_X, ALBUM_Y, ALBUM_W, ALBUM_H)
     ctx.clip()
-    let cursor = this.albumX
-    ALBUMS.forEach((album, i) => {
-      const selected = i === this.album
+    ctx.letterSpacing = '0px'
+    ctx.textBaseline = 'middle'
+    ctx.textAlign = 'center'
+    for (let i = 0; i < pack.left.length; i++) {
+      const selected = i === highlight
+      const name = ALBUMS[i % count]?.name ?? ''
+      const left = ALBUM_X + this.albumX + pack.left[i]
       ctx.globalAlpha = selected ? 1 : 0.3
       ctx.fillStyle = INK
       ctx.font = font(selected ? 72 : 48)
-      ctx.textAlign = 'left'
-      ctx.textBaseline = 'middle'
-      ctx.fillText(album.name, 168.5 + cursor, 963 + 50)
-      this.hit(168.5 + cursor, 963, widths[i], 101, 'album' + i, () => null)
-      cursor += widths[i] + 40
-      ctx.globalAlpha = 1
-    })
+      ctx.fillText(name, left + pack.width[i] / 2, ALBUM_Y + ALBUM_H / 2)
+      const visL = Math.max(left, ALBUM_X)
+      const visR = Math.min(left + pack.width[i], ALBUM_X + ALBUM_W)
+      if (visR > visL) this.hit(visL, ALBUM_Y, visR - visL, ALBUM_H, 'album' + i, () => null)
+    }
     ctx.restore()
     ctx.fillStyle = GREEN
-    round(ctx, 168.5 + 394 - 30, 963 + 122, 60, 12, 6)
+    round(ctx, ALBUM_X + ALBUM_W / 2 - 30, ALBUM_Y + 122, 60, 12, 6)
     ctx.fill()
     const tracks = (ALBUMS[this.album]?.banks ?? [])
       .map((name) => TRACKS.find((track) => track.name === name))
@@ -878,10 +1131,16 @@ export class Menus {
     ctx.font = font(42)
     ctx.textAlign = 'left'
     ctx.textBaseline = 'middle'
-    ctx.fillText('选择关卡', 131, 1146 + 29)
+    ctx.fillText(`全部歌曲${tracks.length}首`, 131, 1146 + 29)
+    this.modeButton(ctx, input.playMode)
     const listTop = 1260
     const listH = 996
     this.hit(x, listTop, 1035, listH, 'mlist', () => null)
+    this.titleScroll = false
+    if (this.titleAlbum !== this.album) {
+      this.titleAlbum = this.album
+      this.titleEpoch = this.now
+    }
     ctx.save()
     ctx.beginPath()
     ctx.rect(x, listTop, 1035, listH)
@@ -892,26 +1151,28 @@ export class Menus {
       const ready = input.banks.states[track.name] === 'ready'
       const loading = input.banks.states[track.name] === 'downloading'
       const failed = input.banks.states[track.name] === 'failed'
-      const playing = input.playing && input.trackName === track.label
+      const playing = this.picked
+        ? this.picked === track.name
+        : input.playing && input.trackName === track.label
       ctx.fillStyle = playing ? GREEN : INK
       ctx.font = font(45)
+      ctx.letterSpacing = TRACK_SPACE
       ctx.textAlign = 'left'
       ctx.textBaseline = 'middle'
       const title = track.label
       const maskW = 700
+      const tw = ctx.measureText(title).width
+      const scroll = tw > maskW + 0.5
+      if (scroll) this.titleScroll = true
+      const shift = scroll ? trackShift(this.now - this.titleEpoch, tw) : 0
       ctx.save()
       ctx.beginPath()
       ctx.rect(131, row, maskW, ROW_H)
       ctx.clip()
-      let tx = 131
-      const tw = ctx.measureText(title).width
-      if (tw > maskW) {
-        const span = tw + 160
-        const travel = ((this.now / 1000) * 80) % (span + 240)
-        tx = 131 - Math.max(0, travel - 240)
-      }
-      ctx.fillText(title, tx, row + ROW_H / 2)
+      ctx.fillText(title, 131 + shift, row + ROW_H / 2)
+      if (scroll) ctx.fillText(title, 131 + shift + tw + TRACK_GAP, row + ROW_H / 2)
       ctx.restore()
+      ctx.letterSpacing = '0px'
       if (ready && !this.heard.has(track.name) && !playing) {
         ctx.fillStyle = '#F32C2C'
         ctx.beginPath()
@@ -928,7 +1189,13 @@ export class Menus {
       this.hit(x, row, 1035, ROW_H, 'tr' + track.name, () => {
         if (loading) return null
         if (ready) {
-          this.heard.add(track.name)
+          const same = input.playing && input.trackName === track.label
+          this.picked = track.name
+          this.pickedAt = this.now
+          if (!same && this.panel === 'music' && !this.panelClosing) {
+            this.panelClosing = true
+            this.panelAnim = { from: this.offset(this.panelAnim), to: H, at: this.now }
+          }
           return { type: 'play', name: track.name }
         }
         return { type: 'download', names: [track.name], quiet: true }
@@ -936,6 +1203,37 @@ export class Menus {
     })
     ctx.restore()
     this.drawBar(ctx, 1035 - 28, listTop, listH, this.listY, Math.max(0, tracks.length * ROW_H - listH))
+  }
+
+  private modeButton(ctx: CanvasRenderingContext2D, mode: PlayMode): void {
+    const art = mode === 'loop' ? '/ui/ref/yy_list.png' : mode === 'shuffle' ? '/ui/ref/yy_suiji.png' : '/ui/ref/yy_danqu.png'
+    const x = 818
+    const y = 1133
+    const w = 180
+    const h = 84
+    blit(ctx, art, x, y, w, h)
+    this.hit(x, y, w, h, 'mode', () => {
+      const next: PlayMode = mode === 'single' ? 'loop' : mode === 'loop' ? 'shuffle' : 'single'
+      const tip = next === 'single' ? '单曲循环' : next === 'loop' ? '列表循环' : '随机播放'
+      this.mode = next
+      this.toast(tip)
+      return { type: 'play-mode', mode: next }
+    })
+  }
+
+  /** Open the album that holds the track the player last chose, and its list title. */
+  private focusPlayingAlbum(): void {
+    const label = this.input?.trackName
+    if (!this.input?.playing || !label) return
+    const index = ALBUMS.findIndex((album) => album.banks.some((name) => {
+      return TRACKS.find((track) => track.name === name)?.label === label
+    }))
+    if (index < 0) return
+    this.album = index
+    const count = ALBUMS[index].banks.length
+    const row = ALBUMS[index].banks.findIndex((name) => TRACKS.find((track) => track.name === name)?.label === label)
+    const max = Math.max(0, count * ROW_H - 996)
+    this.listY = Math.max(0, Math.min(max, (row < 0 ? 0 : row) * ROW_H))
   }
 
   private drawVolume(ctx: CanvasRenderingContext2D, input: UiInput): void {
@@ -976,66 +1274,108 @@ export class Menus {
   private drawPreset(ctx: CanvasRenderingContext2D, input: UiInput): void {
     const x = 45
     const y = 1356
+    const owned = new Set((input.outfitOwned || '').split(',').filter(Boolean))
+    const worn = input.outfitWorn || ''
     paint(ctx, '/ui/ref/panel.png', x, y, 1035, 960, 140)
     this.hit(x, y, 1035, 960, 'card', () => null)
     ctx.fillStyle = '#19191A'
     ctx.font = font(72)
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText('预设', 562.5, y + 84 + 51)
+    ctx.fillText('菠萝衣柜', 562.5, y + 84 + 51)
     ctx.fillStyle = DESC
     ctx.font = font(39)
     ctx.textBaseline = 'top'
-    wrap(ctx, '设置场景预设\n点击以下预设可快速切换场景哦～', x + 84, y + 234, 867, 52, 'center')
+    wrap(ctx, '点卡片可预览穿搭\n支付之后才会留下来哦～', x + 84, y + 234, 867, 52, 'center')
     const listX = x + 48
-    const listY = y + 426
-    this.hit(listX, listY, 1035 - 96, 342, 'plist', () => null)
+    const listY = y + 390
+    this.hit(listX, listY, 1035 - 96, 360, 'plist', () => null)
     ctx.save()
     ctx.beginPath()
-    ctx.rect(listX, listY, 1035 - 96, 342)
+    ctx.rect(listX, listY, 1035 - 96, 360)
     ctx.clip()
-    PRESETS.forEach((preset, i) => {
+    OUTFITS.forEach((outfit, i) => {
       const cx = listX + 60 + i * (264 + 36) - this.presetX
-      blit(ctx, `/ui/ref/zhanweitu${i + 1}.png`, cx, listY, 264, 264)
-      const ready = input.banks.states[preset.bank] === 'ready'
-      const loading = input.banks.states[preset.bank] === 'downloading'
-      const playing = input.presetId === preset.id && ready
-      const failed = input.banks.states[preset.bank] === 'failed'
-      blit(ctx, '/ui/ref/bofangzhuangtai.png', cx + 24, listY + 162, 78, 78)
-      if (playing) drawEqualizer(ctx, cx + 24, listY + 162, 78, this.now / 1000)
-      else if (loading) ring(ctx, cx + 63, listY + 201, 18, input.banks.progress[preset.bank] ?? 0)
-      else if (!ready) blit(ctx, failed ? '/ui/ref/stateerror.png' : '/ui/ref/statewaitdownload.png', cx + 33, listY + 171, 60, 60)
-      else blit(ctx, '/ui/ref/stateready.png', cx + 33, listY + 171, 60, 60)
-      if (ready && !playing && !this.heard.has(preset.id)) {
-        ctx.fillStyle = '#F32C2C'
-        ctx.beginPath()
-        ctx.arc(cx + 70, listY + 190, 8, 0, Math.PI * 2)
-        ctx.fill()
+      const mine = owned.has(outfit.id)
+      const on = worn === outfit.id
+      const open = this.dressId === outfit.id
+      round(ctx, cx, listY, 264, 264, 36)
+      ctx.fillStyle = SWATCH[outfit.id] || '#F3E2A0'
+      ctx.fill()
+      if (on || open) {
+        ctx.lineWidth = 8
+        ctx.strokeStyle = on ? '#A6FF00' : '#19191A'
+        ctx.stroke()
       }
       ctx.fillStyle = '#19191A'
-      ctx.font = font(39)
+      ctx.font = font(42)
       ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillStyle = outfit.id === 'star' ? '#F4F1E4' : '#19191A'
+      ctx.fillText(outfit.name, cx + 132, listY + 100)
+      ctx.font = font(28)
+      ctx.fillText(outfit.line, cx + 132, listY + 156)
+      if (!mine) this.lockMark(ctx, cx + 196, listY + 36)
+      ctx.fillStyle = '#19191A'
+      ctx.font = font(30)
       ctx.textBaseline = 'top'
-      ctx.fillText(preset.label, cx + 132, listY + 288)
-      this.hit(cx, listY, 264, 342, 'ps' + preset.id, () => {
-        if ((this.input?.iris ?? 0) > 0.05) {
-          this.toast('天气正在改变,稍后再操作')
-          return null
+      ctx.fillText(mine ? (on ? '穿戴中' : '已拥有') : `¥${outfit.price}`, cx + 132, listY + 288)
+      this.hit(cx, listY, 264, 360, 'ps' + outfit.id, () => {
+        if (mine) {
+          this.dressId = ''
+          return { type: 'outfit-wear', id: on ? '' : outfit.id }
         }
-        if (!ready) return { type: 'download', names: [preset.bank], quiet: true }
-        this.heard.add(preset.id)
-        this.panel = null
-        this.panelClosing = false
-        return { type: 'preset', id: preset.id }
+        this.dressId = outfit.id
+        return { type: 'outfit-preview', id: outfit.id }
       })
     })
     ctx.restore()
-    const max = this.clampPreset(1e9)
-    blit(ctx, '/ui/ref/scroll-track.png', 562.5 - 120, y + 858, 240, 18)
-    const thumbX = max <= 0 ? 562.5 - 31.5 : 562.5 - 120 + (240 - 63) * (this.presetX / max)
-    ctx.globalAlpha = this.now - this.barAt < 3000 ? 1 : 0.5
-    blit(ctx, '/ui/ref/scroll-track-active.png', thumbX, y + 858, 63, 18)
-    ctx.globalAlpha = 1
+    const paying = this.payAt > this.now
+    const dress = OUTFITS.find((item) => item.id === this.dressId)
+    if (dress && !owned.has(dress.id)) {
+      const bx = 562.5 - 240
+      const by = y + 800
+      round(ctx, bx, by, 480, 108, 54)
+      ctx.fillStyle = paying ? '#C8C8C8' : '#19191A'
+      ctx.fill()
+      ctx.fillStyle = '#fff'
+      ctx.font = font(40)
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(paying ? '支付中' : `模拟支付 ¥${dress.price}`, 562.5, by + 54)
+      this.hit(bx, by, 480, 108, 'pbuy', () => {
+        if (this.payAt > this.now) return null
+        this.payId = dress.id
+        this.payAt = this.now + 700
+        this.toast('支付中', 700)
+        return null
+      })
+    } else {
+      const max = this.clampPreset(1e9)
+      blit(ctx, '/ui/ref/scroll-track.png', 562.5 - 120, y + 858, 240, 18)
+      const thumbX = max <= 0 ? 562.5 - 31.5 : 562.5 - 120 + (240 - 63) * (this.presetX / max)
+      ctx.globalAlpha = this.now - this.barAt < 3000 ? 1 : 0.5
+      blit(ctx, '/ui/ref/scroll-track-active.png', thumbX, y + 858, 63, 18)
+      ctx.globalAlpha = 1
+    }
+  }
+
+  private lockMark(ctx: CanvasRenderingContext2D, x: number, y: number): void {
+    ctx.save()
+    ctx.translate(x, y)
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'
+    ctx.beginPath()
+    ctx.arc(0, 0, 28, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.strokeStyle = '#fff'
+    ctx.lineWidth = 4
+    ctx.beginPath()
+    ctx.arc(0, -4, 10, Math.PI, 0)
+    ctx.stroke()
+    round(ctx, -12, -2, 24, 18, 4)
+    ctx.fillStyle = '#fff'
+    ctx.fill()
+    ctx.restore()
   }
 
   private drawBar(ctx: CanvasRenderingContext2D, x: number, y: number, h: number, scroll: number, max: number): void {
@@ -1665,6 +2005,33 @@ function ensureTimerFont(): void {
 const sprites = new Map<string, HTMLImageElement>()
 let spriteRev = 0
 
+const MENU_WARM = [
+  '/ui/ref/music-card.png',
+  '/ui/ref/panel.png',
+  '/ui/ref/track.png',
+  '/ui/ref/fill.png',
+  '/ui/ref/dian.png',
+  '/ui/ref/guanbi.png',
+  '/ui/ref/morendian.png',
+  '/ui/ref/bgkuang.png',
+  '/ui/ref/app-logo.png',
+  '/ui/ref/avatar-ring.png',
+  '/ui/mine/guest-heart.png',
+  '/ui/joystick/knob.png',
+  '/ui/joystick/ring.png',
+]
+
+let menusPrimed = false
+export function warmMenus(): void {
+  if (menusPrimed || typeof Image === 'undefined') return
+  menusPrimed = true
+  for (const src of MENU_WARM) sprite(src)
+  const queue = () => { primePlaying() }
+  const ric = (globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback
+  if (ric) ric(queue, { timeout: 4000 })
+  else setTimeout(queue, 1600)
+}
+
 function sprite(src: string): HTMLImageElement | null {
   if (typeof Image === 'undefined') return null
   let image = sprites.get(src)
@@ -1804,7 +2171,17 @@ function textWidth(text: string, size: number): number {
   }
   if (!measureCanvas) return text.length * size
   measureCanvas.font = size >= 100 ? timerFont(size) : font(size)
+  measureCanvas.letterSpacing = '0px'
   return measureCanvas.measureText(text).width
+}
+
+/** Dual-copy title scroll. One loop lands the second copy where the first started, then it holds. */
+function trackShift(elapsedMs: number, textW: number): number {
+  const loop = textW + TRACK_GAP
+  const scrollT = loop / TRACK_SPEED
+  const t = (elapsedMs / 1000) % (scrollT + TRACK_PAUSE)
+  if (t < scrollT) return -(t * TRACK_SPEED)
+  return 0
 }
 
 function nearest(margin: number): number {
@@ -1910,4 +2287,9 @@ function sizeText(bytes: number): string {
   if (mb >= 10) return String(Math.round(mb))
   const text = mb.toFixed(1)
   return text.endsWith('.0') ? text.slice(0, -2) : text
+}
+
+// The music card is tiny. Fetch it with the script, before the loading page hides.
+if (typeof Image !== 'undefined') {
+  for (const src of MENU_WARM) sprite(src)
 }

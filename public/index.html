@@ -6,18 +6,109 @@
   <title>波萝小程序</title>
   <style>
     html,body{margin:0;height:100%;width:100%;background:#111;overflow:hidden;position:fixed;inset:0}
-    #boot{position:fixed;inset:0;width:100%;height:100%;object-fit:fill;z-index:0;background:#111}
+    #boot{position:fixed;inset:0;width:100%;height:100%;object-fit:fill;z-index:2;background:#111;pointer-events:none}
     #boluo,#ui{position:fixed;touch-action:none;background:transparent}
     #boluo{inset:0;width:100vw;height:100vh;z-index:1}
-    #ui{z-index:2}
+    #ui{z-index:4}
     #fps{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9;margin:0;padding:6px 14px;border-radius:999px;background:rgba(0,0,0,.45);color:#fff;font:600 22px/1.2 sans-serif;pointer-events:none}
   </style>
 </head>
 <body>
   <p id="fps">-- fps</p>
-  <video id="boot" playsinline muted loop></video>
+  <video id="boot" playsinline muted loop autoplay preload="auto"></video>
   <canvas id="boluo"></canvas>
   <canvas id="ui"></canvas>
-  <script src="game.js?v=69"></script>
+  <script>
+    (function () {
+      var path = location.pathname
+      var dir = path.endsWith('/') ? path : path.slice(0, path.lastIndexOf('/') + 1)
+      var prefix = dir === '/' ? '' : dir.replace(/\/$/, '')
+      function fix(url) {
+        if (!prefix || typeof url !== 'string' || url.charAt(0) !== '/' || url.charAt(1) === '/') return url
+        if (url === prefix || url.indexOf(prefix + '/') === 0) return url
+        return prefix + url
+      }
+      function preload(url, as, priority) {
+        var link = document.createElement('link')
+        link.rel = 'preload'
+        link.as = as
+        link.href = fix(url)
+        if (priority) link.setAttribute('fetchpriority', priority)
+        document.head.appendChild(link)
+      }
+      var bootName = window.innerWidth >= window.innerHeight ? '/boot/loading_landscape.mp4' : '/boot/loading.mp4'
+      preload(bootName, 'video', 'high')
+      var savedTrack = ''
+      var followTime = true
+      var period = 1
+      try {
+        savedTrack = localStorage.getItem('boluo.track') || ''
+        followTime = localStorage.getItem('boluo.followTime') !== '0'
+        var followWeather = localStorage.getItem('boluo.followWeather') !== '0'
+        var weather = localStorage.getItem('boluo.weather') || ''
+        if (!followTime) {
+          var savedPeriod = parseInt(localStorage.getItem('boluo.period') || '', 10)
+          if (savedPeriod >= 0 && savedPeriod < 4) period = savedPeriod
+        } else {
+          var hour = new Date().getHours()
+          period = hour < 10 ? 0 : hour < 16 ? 1 : hour < 20 ? 2 : 3
+        }
+        if (!followWeather && weather === 'fog') period = -1
+      } catch (e) {}
+      var grass = period < 0 ? '/audio/Grass_Fog.mp3' : period >= 3 ? '/audio/Grass_Night.mp3' : '/audio/Grass_Noon.mp3'
+      var song = /^Music\d+_\d+$/.test(savedTrack) ? savedTrack : 'Music1_1'
+      preload(grass, 'fetch')
+      preload('/audio/' + song + '.mp3', 'audio')
+      ;[
+        '/ui/ref/music-card.png',
+        '/ui/ref/music-icon.png',
+        '/ui/ref/setting.svg',
+        '/ui/weather/qingtian.png',
+        '/ui/joystick/knob.png',
+        '/ui/joystick/ring.png',
+        '/ui/health/tip_bg1.png',
+        '/ui/health/tip_icon.png',
+        '/ui/health/tip_dian.png',
+      ].forEach(function (url) { preload(url, 'image', 'high') })
+      var boot = document.getElementById('boot')
+      if (boot) {
+        boot.src = fix(bootName)
+        boot.muted = true
+        boot.playsInline = true
+        boot.play().catch(function () {})
+      }
+      if (!prefix) return
+      function patchSrc(proto) {
+        var desc = Object.getOwnPropertyDescriptor(proto, 'src')
+        if (!desc || !desc.set) return
+        Object.defineProperty(proto, 'src', {
+          configurable: true,
+          enumerable: true,
+          get: function () { return desc.get.call(this) },
+          set: function (value) { desc.set.call(this, fix(value)) },
+        })
+      }
+      patchSrc(HTMLImageElement.prototype)
+      patchSrc(HTMLMediaElement.prototype)
+      var origFetch = window.fetch
+      window.fetch = function (input, init) {
+        return origFetch.call(this, typeof input === 'string' ? fix(input) : input, init)
+      }
+      if (window.FontFace) {
+        var Orig = window.FontFace
+        function Patched(family, source, descriptors) {
+          if (typeof source === 'string') {
+            source = source.replace(/url\(\s*(['"]?)(\/[^)'"]+)\1\s*\)/g, function (_, quote, url) {
+              return 'url(' + quote + fix(url) + quote + ')'
+            })
+          }
+          return new Orig(family, source, descriptors)
+        }
+        Patched.prototype = Orig.prototype
+        window.FontFace = Patched
+      }
+    })()
+  </script>
+  <script src="game.js?v=81"></script>
 </body>
 </html>

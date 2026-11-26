@@ -30,11 +30,16 @@ export interface ApiResult {
 }
 
 let useProxy = false
+let corsProxy = ''
 let userToken = ''
 let deviceId = ''
 
 export function useBrowserProxy(on: boolean): void {
   useProxy = on
+}
+
+export function useCorsProxy(url: string): void {
+  corsProxy = url.replace(/\/$/, '')
 }
 
 export function setUserToken(token: string): void {
@@ -144,7 +149,9 @@ function load(url: string, method: string, headers: Record<string, string>, body
 function endpoint(path: string): string {
   const suffix = path.startsWith('/') ? path : `/${path}`
   if (useProxy) return `/wanos-api${suffix}`
-  return `${boluoEnv.api}${suffix}`
+  if (corsProxy) return `${corsProxy}${suffix}`
+  const host = suffix.startsWith('/boluo/') ? boluoEnv.boluo : boluoEnv.api
+  return `${host}${suffix}`
 }
 
 export async function request(
@@ -157,18 +164,21 @@ export async function request(
 ): Promise<ApiResult> {
   const payload = method === 'POST' ? JSON.stringify(body || {}) : null
   const signed = signJson(payload || JSON.stringify(query))
-  const headers: Record<string, string> = {
-    deviceToken,
-    userToken,
-    deviceId,
-    channel: CHANNEL,
-    version: APP_VERSION,
-    healthChannel: '',
-    thirdPartyId: deviceId,
-    originEnd: ORIGIN,
-    notCheckSign: '0',
-    sign: signed.sign,
-    nonceStr: signed.nonceStr,
+  // The public page does not forward login. A direct browser call has no proxy.
+  const directBrowser = !useProxy && !corsProxy && !miniApi()
+  const headers: Record<string, string> = {}
+  const put = (key: string, value: string) => { if (value) headers[key] = value }
+  put('deviceToken', deviceToken)
+  put('userToken', userToken)
+  put('deviceId', deviceId)
+  put('channel', CHANNEL)
+  put('originEnd', ORIGIN)
+  put('sign', signed.sign)
+  put('nonceStr', signed.nonceStr)
+  if (!directBrowser) {
+    put('version', APP_VERSION)
+    put('thirdPartyId', deviceId)
+    headers.notCheckSign = '0'
   }
   let url = endpoint(path)
   if (method === 'GET') {

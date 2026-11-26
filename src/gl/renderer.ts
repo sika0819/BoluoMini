@@ -1,7 +1,7 @@
 import type { Host } from '../host/types'
 import { stageFit } from '../ui/fit'
 import { identity, lookAt, multiply, perspective } from './math'
-import { FORWARD_FS, FORWARD_VS, SKY_FS, SKY_VS } from '../oil/shaders'
+import { FIRE_FS, FIRE_VS, FORWARD_FS, FORWARD_VS, SKY_FS, SKY_VS } from '../oil/shaders'
 import { skyLook } from './sky'
 import type { MeshData } from '../scene/world'
 
@@ -16,6 +16,16 @@ export interface FrameState {
   eye: number[]
   target: number[]
   sun: number[]
+  /** Sun painted into the visible sky. The light direction stays `sun`. */
+  skySun: number[]
+  /** Moon painted into the visible sky. */
+  moon: number[]
+  /** Sine of the true moon elevation. */
+  moonEl: number
+  /** Sun on the moon's disc. x compass-right, y toward zenith. */
+  moonLit: number[]
+  /** dot(true moon, true sun). -1 full, 1 new. */
+  moonCos: number
   sunColor: number[]
   fogColor: number[]
   fogDensity: number
@@ -30,12 +40,22 @@ export interface FrameState {
   flash: number
   /** Sway scale. Higher wind gears move plants farther. */
   wind: number
+  /** Horizontal cloud scroll, already wrapped onto the sky lattice. */
+  cloudDrift: number
+  /** Vertical cloud scroll. Bounded so the sky hash stays a small angle. */
+  cloudLift: number
   /** 0 morning, 1 noon, 2 sunset, 3 night. Drives the sky gradient. */
   period: number
   /** 0..1 cumulus cover. */
   cover: number
   /** 0..1 hunt darkening. Scales sun, sky, and the ambient floor. */
   dim: number
+  /** 0 rind grid, 1 strawberry, 2 night sky. Only the pineapple body reads it. */
+  look: number
+  /** 0 day, 1 night. Scales the campfire card and its point light. */
+  fire: number
+  /** World position of the campfire point light. */
+  firePos: number[]
   items: DrawItem[]
   outline: DrawItem[]
 }
@@ -94,10 +114,19 @@ export class Renderer {
   private quad: WebGLBuffer
   private leaf: WebGLTexture
   private face: WebGLTexture
+  private fireProg: Program
+  private fireShape: WebGLTexture
+  private fireNoise: WebGLTexture
+  private fireMask: WebGLTexture
+  private fireGrad: WebGLTexture
   private view = new Float32Array(16)
   private proj = new Float32Array(16)
   private viewProj = new Float32Array(16)
+  private uiQuadData = new Float32Array(16)
   private attribCount = 8
+  private fragHigh = true
+  private uiTexW = 0
+  private uiTexH = 0
   readonly ready: boolean
 
   constructor(private host: Host) {
@@ -110,9 +139,12 @@ export class Renderer {
     }) ?? host.screen.getContext('webgl')
     if (!gl) throw new Error('webgl')
     this.gl = gl
+    const prec = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT)
+    this.fragHigh = !!prec && prec.precision > 0
     this.attribCount = gl.getParameter(gl.MAX_VERTEX_ATTRIBS) as number
     this.forward = link(gl, FORWARD_VS, FORWARD_FS, ['aPos', 'aNormal', 'aColor', 'aKind', 'aUv'])
     this.sky = link(gl, SKY_VS, SKY_FS, ['aPos'])
+    this.fireProg = link(gl, FIRE_VS, FIRE_FS, ['aPos', 'aUv'])
     this.quad = gl.createBuffer()!
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad)
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW)
@@ -126,10 +158,24 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    const blank = (fill: number) => {
+      const tex = gl.createTexture()!
+      gl.bindTexture(gl.TEXTURE_2D, tex)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([fill, fill, fill, 255]))
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+      return tex
+    }
+    this.fireShape = blank(0)
+    this.fireNoise = blank(128)
+    this.fireMask = blank(0)
+    this.fireGrad = blank(255)
     this.ready = true
   }
 
-  private loadTex(target: WebGLTexture, url: string, mip = false, flipY = true): void {
+  private loadTex(target: WebGLTexture, url: string, mip = false, flipY = true, repeat = false): void {
     const g = globalThis as unknown as {
       Image?: new () => HTMLImageElement
       wx?: { createImage?: () => HTMLImageElement }
@@ -148,10 +194,11 @@ export class Renderer {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img)
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
       if (mip) gl.generateMipmap(gl.TEXTURE_2D)
+      const wrap = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap)
     }
     img.src = url
   }
@@ -166,6 +213,14 @@ export class Renderer {
    */
   loadFace(url: string): void {
     this.loadTex(this.face, url, true, false)
+  }
+
+  /** UnityFire maps. Noise tiles; the shape, mask, and gradient stay clamped. */
+  loadFire(): void {
+    this.loadTex(this.fireShape, 'oil/fire-shape.png')
+    this.loadTex(this.fireNoise, 'oil/fire-noise.png', false, true, true)
+    this.loadTex(this.fireMask, 'oil/fire-mask.png')
+    this.loadTex(this.fireGrad, 'oil/fire-grad.png')
   }
 
   /** Every tier draws the same direct pass. */
@@ -240,6 +295,7 @@ export class Renderer {
 
     this.drawSky(frame, w, h)
     this.drawShaded(frame, false)
+    this.drawFire(frame)
     this.drawShaded(frame, true)
     gl.enable(gl.CULL_FACE)
     gl.disable(gl.BLEND)
@@ -273,11 +329,16 @@ export class Renderer {
     gl.uniform3f(u.uForward, -v[2], -v[6], -v[10])
     gl.uniform1f(u.uAspect, w / Math.max(1, h))
     gl.uniform1f(u.uTan, Math.tan(Math.PI / 6))
-    gl.uniform3fv(u.uSunDir, frame.sun)
+    gl.uniform3fv(u.uSunDir, frame.skySun)
+    gl.uniform1f(u.uSunEl, frame.sun[1])
+    gl.uniform3fv(u.uMoonDir, frame.moon)
+    gl.uniform1f(u.uMoonEl, frame.moonEl)
+    gl.uniform2fv(u.uMoonLit, frame.moonLit)
+    gl.uniform1f(u.uMoonCos, frame.moonCos)
     gl.uniform1f(u.uNight, look.night)
     gl.uniform1f(u.uRain, frame.rain)
-    gl.uniform1f(u.uTime, frame.time)
-    gl.uniform1f(u.uWind, frame.wind)
+    gl.uniform1f(u.uDrift, frame.cloudDrift)
+    gl.uniform1f(u.uLift, frame.cloudLift)
     gl.uniform1f(u.uMist, frame.mist)
     gl.uniform1f(u.uFlash, frame.flash)
     const dusk = 1 - frame.dim * 0.78
@@ -312,12 +373,15 @@ export class Renderer {
     gl.uniform3fv(u.uSunColor, frame.sunColor)
     gl.uniform3fv(u.uFogColor, frame.fogColor)
     gl.uniform1f(u.uFogDensity, frame.fogDensity)
-    gl.uniform1f(u.uTime, frame.time)
+    gl.uniform1f(u.uTime, this.animTime(frame.time))
     gl.uniform1f(u.uWind, frame.wind)
     gl.uniform1f(u.uRain, frame.rain)
     gl.uniform1f(u.uMist, frame.mist)
     gl.uniform3fv(u.uEye, frame.eye)
     gl.uniform1f(u.uDim, frame.dim)
+    if (u.uLook) gl.uniform1f(u.uLook, frame.look || 0)
+    if (u.uFirePos) gl.uniform3fv(u.uFirePos, frame.firePos ?? [0, 0, 0])
+    if (u.uFire) gl.uniform1f(u.uFire, frame.fire || 0)
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this.leaf)
     gl.uniform1i(u.uLeaf, 0)
@@ -334,6 +398,7 @@ export class Renderer {
       gl.depthMask(true)
     }
     for (const item of frame.items) {
+      if (item.mesh.flame) continue
       if (!!item.mesh.blended !== blended) continue
       const gpu = this.gpu(item.mesh)
       if (gpu.count < 3) continue
@@ -343,6 +408,51 @@ export class Renderer {
       gl.uniformMatrix4fv(u.uModel, false, item.model)
       gl.drawElements(gl.TRIANGLES, gpu.count, gl.UNSIGNED_SHORT, 0)
     }
+  }
+
+  private drawFire(frame: FrameState): void {
+    if (!frame.fire || frame.fire <= 0.004) return
+    const item = frame.items.find((entry) => entry.mesh.flame)
+    if (!item || item.mesh.indices.length < 3) return
+    const gl = this.gl
+    const program = this.fireProg
+    const u = program.uniforms
+    const gpu = this.gpu(item.mesh)
+    gl.useProgram(program.program)
+    gl.uniformMatrix4fv(u.uViewProj, false, this.viewProj)
+    gl.uniform1f(u.uTime, this.animTime(frame.time))
+    gl.uniform1f(u.uFactor, frame.fire)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this.fireShape)
+    gl.uniform1i(u.uShape, 0)
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, this.fireNoise)
+    gl.uniform1i(u.uNoise, 1)
+    gl.activeTexture(gl.TEXTURE2)
+    gl.bindTexture(gl.TEXTURE_2D, this.fireMask)
+    gl.uniform1i(u.uMask, 2)
+    gl.activeTexture(gl.TEXTURE3)
+    gl.bindTexture(gl.TEXTURE_2D, this.fireGrad)
+    gl.uniform1i(u.uGrad, 3)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+    gl.depthMask(false)
+    gl.disable(gl.CULL_FACE)
+    for (let i = 0; i < this.attribCount; i++) gl.disableVertexAttribArray(i)
+    gl.bindBuffer(gl.ARRAY_BUFFER, gpu.vbo)
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gpu.ibo)
+    const pos = program.attribs.aPos
+    const uv = program.attribs.aUv
+    if (pos >= 0) {
+      gl.enableVertexAttribArray(pos)
+      gl.vertexAttribPointer(pos, 3, gl.FLOAT, false, STRIDE, 0)
+    }
+    if (uv >= 0) {
+      gl.enableVertexAttribArray(uv)
+      gl.vertexAttribPointer(uv, 2, gl.FLOAT, false, STRIDE, 40)
+    }
+    gl.drawElements(gl.TRIANGLES, gpu.count, gl.UNSIGNED_SHORT, 0)
   }
 
   private uiProgram: Program | null = null
@@ -378,13 +488,25 @@ export class Renderer {
     const x1 = (fit.x + fit.width) / canvas.width * 2 - 1
     const y0 = 1 - (fit.y + fit.height) / canvas.height * 2
     const y1 = 1 - fit.y / canvas.height * 2
+    const data = this.uiQuadData
+    data[0] = x0
+    data[1] = y0
+    data[2] = 0
+    data[3] = 0
+    data[4] = x1
+    data[5] = y0
+    data[6] = 1
+    data[7] = 0
+    data[8] = x0
+    data[9] = y1
+    data[10] = 0
+    data[11] = 1
+    data[12] = x1
+    data[13] = y1
+    data[14] = 1
+    data[15] = 1
     gl.bindBuffer(gl.ARRAY_BUFFER, this.uiQuad)
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-      x0, y0, 0, 0,
-      x1, y0, 1, 0,
-      x0, y1, 0, 1,
-      x1, y1, 1, 1,
-    ]), gl.DYNAMIC_DRAW)
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW)
     gl.useProgram(this.uiProgram.program)
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, texture)
@@ -409,13 +531,32 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas as unknown as TexImageSource)
+    this.uiTexW = canvas.width
+    this.uiTexH = canvas.height
     return tex
   }
 
   updateUi(tex: WebGLTexture, canvas: Host['screen']): void {
     const gl = this.gl
     gl.bindTexture(gl.TEXTURE_2D, tex)
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas as unknown as TexImageSource)
+    if (canvas.width !== this.uiTexW || canvas.height !== this.uiTexH) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas as unknown as TexImageSource)
+      this.uiTexW = canvas.width
+      this.uiTexH = canvas.height
+      return
+    }
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, canvas as unknown as TexImageSource)
+  }
+
+  /**
+   * Fold a unix or session clock into a range whose fraction still exists.
+   * 12560 = 20×628, so fract(t × 0.85) meets itself. Without fragment highp,
+   * mediump only keeps a useful fraction for a few seconds.
+   */
+  private animTime(time: number): number {
+    const span = this.fragHigh ? 12560 : 20
+    const w = time % span
+    return w < 0 ? w + span : w
   }
 }
 

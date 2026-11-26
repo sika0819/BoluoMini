@@ -1,8 +1,8 @@
-import { createServer, request as httpRequest } from 'http'
-import { request as httpsRequest } from 'https'
+import { createServer } from 'http'
 import { readFileSync, existsSync } from 'fs'
-import { join, dirname, extname } from 'path'
+import { dirname, extname, join, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
+import { readCard, say, voiceStatus } from './say.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 const types = {
@@ -15,35 +15,64 @@ const types = {
   '.ttf': 'font/ttf',
   '.mp3': 'audio/mpeg',
 }
-const port = 4173
-function readEnv() {
+const port = Number(process.env.PORT || 4173)
+
+function readBody(req) {
+  return new Promise((resolveBody, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > 4096) {
+        reject(new Error('too big'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolveBody(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
+}
+
+function sendJson(res, status, body) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+  })
+  res.end(JSON.stringify(body))
+}
+
+async function handleSay(req, res) {
+  if (req.method !== 'POST') {
+    sendJson(res, 404, { text: null })
+    return
+  }
   try {
-    return JSON.parse(readFileSync(join(root, 'boluo-env.json'), 'utf8'))
+    const raw = await readBody(req)
+    const body = JSON.parse(raw)
+    const card = readCard(body)
+    const text = card.intent ? await say(card) : null
+    sendJson(res, 200, { text })
   } catch {
-    return { api: 'https://wanos-common-dev.wanos.vip' }
+    sendJson(res, 200, { text: null })
   }
 }
 
 function onRequest(req, res) {
   const url = new URL(req.url || '/', 'http://localhost')
-  if (url.pathname.startsWith('/wanos-api/')) {
-    const target = new URL(readEnv().api.replace(/\/$/, '') + url.pathname.slice('/wanos-api'.length) + url.search)
-    const headers = { ...req.headers, host: target.host }
-    delete headers['accept-encoding']
-    const lib = target.protocol === 'https:' ? httpsRequest : httpRequest
-    const proxy = lib(target, { method: req.method, headers }, (up) => {
-      res.writeHead(up.statusCode || 502, up.headers)
-      up.pipe(res)
-    })
-    proxy.on('error', () => {
-      if (!res.headersSent) res.writeHead(502)
-      res.end('proxy error')
-    })
-    req.pipe(proxy)
+  if (url.pathname === '/api/say') {
+    void handleSay(req, res)
     return
   }
-  let path = join(root, decodeURIComponent(url.pathname))
-  if (url.pathname === '/') path = join(root, 'index.html')
+  const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html'
+  const path = resolve(root, rel)
+  const base = resolve(root)
+  if (path !== base && !path.startsWith(base + sep)) {
+    res.writeHead(403)
+    res.end('forbidden')
+    return
+  }
   if (!existsSync(path)) {
     res.writeHead(404)
     res.end('not found')
@@ -56,8 +85,7 @@ function onRequest(req, res) {
   res.end(readFileSync(path))
 }
 
-for (const host of ['0.0.0.0', '::']) {
-  createServer(onRequest).listen(port, host, () => {
-    console.log(`http://${host}:${port}`)
-  })
-}
+createServer(onRequest).listen(port, '127.0.0.1', () => {
+  console.log(`http://127.0.0.1:${port}`)
+  console.log(voiceStatus())
+})

@@ -23,7 +23,7 @@ function hypot(x: number, y: number, z = 0): number {
 
 /** Actor-local point (Y-up, after the chest) into world. Face is +Z, screen-right is +X. */
 function toWorld(
-  pose: { x: number; y: number; z: number; yaw: number },
+  pose: { x: number; y: number; z: number; yaw: number; lift: number },
   px: number, py: number, pz: number,
 ): { x: number; y: number; z: number } {
   const cy = Math.cos(pose.yaw)
@@ -31,7 +31,7 @@ function toWorld(
   const s = ACTOR_SCALE
   return {
     x: pose.x + s * (cy * px + sy * pz),
-    y: pose.y + ACTOR_LIFT + s * py,
+    y: pose.y + ACTOR_LIFT + pose.lift + s * py,
     z: pose.z + s * (-sy * px + cy * pz),
   }
 }
@@ -72,7 +72,7 @@ export function createCatchlights(): MeshData {
 export function updateCatchlights(
   mesh: MeshData,
   actor: Actor,
-  pose: { x: number; y: number; z: number; yaw: number },
+  pose: { x: number; y: number; z: number; yaw: number; lift: number },
   cam: { x: number; y: number; z: number },
 ): void {
   const dst = mesh.interleaved

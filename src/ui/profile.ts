@@ -2,6 +2,7 @@ import {
   bindWechatPhone,
   currentUser,
   enterGuest,
+  guestLoginOpen,
   loginMobile,
   loginPassword,
   pollWechat,
@@ -303,7 +304,7 @@ export class ProfilePane {
 
   note(id: string): void {
     if (!this.field) return
-    if (id.startsWith(`pfield-${this.field}`) || id.startsWith(`peye-${this.field}`)) return
+    if (id.startsWith(`pfield-${this.field}`) || id.startsWith(`peye-${this.field}`) || id.startsWith(`pclear-${this.field}`)) return
     this.blur()
   }
 
@@ -615,13 +616,15 @@ export class ProfilePane {
       return null
     }, false)
     if (this.lastMethod === 'wechat') this.lastBubble(ctx, W / 2, y)
-    y += buttonH + dp(12)
-    this.loginButton(ctx, x, y, w, '游客进入', true, 'login-guest-go', () => {
-      this.ensureAgree(() => this.submitGuest())
-      return null
-    }, false)
-    if (this.lastMethod === 'guest') this.lastBubble(ctx, W / 2, y)
-    y += buttonH + dp(36)
+    y += buttonH + (guestLoginOpen() ? dp(12) : dp(36))
+    if (guestLoginOpen()) {
+      this.loginButton(ctx, x, y, w, '游客进入', true, 'login-guest-go', () => {
+        this.ensureAgree(() => this.submitGuest())
+        return null
+      }, false)
+      if (this.lastMethod === 'guest') this.lastBubble(ctx, W / 2, y)
+      y += buttonH + dp(36)
+    }
     this.agreementRow(ctx, y, true)
   }
 
@@ -871,9 +874,13 @@ export class ProfilePane {
   ): void {
     const h = dp(56)
     const value = this.values[id]
-    const live = this.field === id && this.domReady()
+    const editing = this.field === id && this.domReady()
+    // Android WanosInputField: clear button only while focused and non-empty.
+    const clearW = editing && value.length > 0 ? dp(8) + dp(24) : 0
+    const fieldW = Math.max(dp(40), w - clearW)
     const hidden = secret && this.secret[id] !== false
-    if (!live) {
+    // Empty focus keeps the same gray 18sp hint. Only a value is handed to the DOM field.
+    if (!(editing && value.length > 0)) {
       ctx.fillStyle = value ? INK : '#C4C4C7'
       ctx.font = fontRegular(dp(18))
       ctx.textAlign = 'left'
@@ -881,14 +888,31 @@ export class ProfilePane {
       const shown = value
         ? (hidden ? '•'.repeat(Math.min(value.length, 18)) : (id === 'phone' ? spacedPhone(value) : value))
         : placeholder
-      ctx.fillText(fitText(ctx, shown, Math.max(dp(40), w - dp(8))), x, y + h / 2)
+      ctx.fillText(fitText(ctx, shown, Math.max(dp(40), fieldW - dp(8))), x, y + h / 2)
     }
     ctx.fillStyle = LINE
     ctx.fillRect(x, y + h - Math.max(1, dp(1)), w, Math.max(1, dp(1)))
-    this.hit(x, y, w, h, 'pfield-' + id, () => {
+    this.hit(x, y, fieldW, h, 'pfield-' + id, () => {
       this.focus(id, numeric, false)
       return null
     })
+    if (clearW) {
+      const ix = x + fieldW + dp(8)
+      const iy = y + (h - dp(24)) / 2
+      drawInputClear(ctx, ix, iy, dp(24))
+      this.hit(ix, iy, dp(24), dp(24), 'pclear-' + id, () => {
+        this.values[id] = ''
+        const el = document.getElementById('boluo-field-' + id) as HTMLInputElement | null
+        if (el) {
+          el.value = ''
+          el.classList.remove('has-value')
+          el.classList.add('on')
+          this.field = id
+          focusField(el)
+        }
+        return null
+      })
+    }
     // Coordinates are inside the centered card. The DOM field is positioned in
     // panel space, so the card offset has to be baked in or the caret lands
     // above the line and the tap never hits the real input.
@@ -896,7 +920,7 @@ export class ProfilePane {
       id,
       x: x + this.loginPadX,
       y: y + this.loginPadY,
-      w,
+      w: fieldW,
       h,
       multiline: false,
       secret,
@@ -1082,7 +1106,10 @@ export class ProfilePane {
           return null
         },
       },
-      {
+      { label: capsule, id: 'login-opt-text', mark: capsuleMark, on: onCapsule },
+    ]
+    if (guestLoginOpen()) {
+      items.splice(1, 0, {
         label: '游客进入',
         id: 'login-opt-guest',
         mark: this.lastMethod === 'guest',
@@ -1090,9 +1117,8 @@ export class ProfilePane {
           this.ensureAgree(() => this.submitGuest())
           return null
         },
-      },
-      { label: capsule, id: 'login-opt-text', mark: capsuleMark, on: onCapsule },
-    ]
+      })
+    }
     ctx.font = fontRegular(dp(14))
     const gap = dp(18)
     const widths = items.map((item) => ctx.measureText(item.label).width)
@@ -1179,21 +1205,23 @@ export class ProfilePane {
     const size = dp(48)
     const cx = W / 2
     const oy = y + dp(88)
-    ctx.beginPath()
-    ctx.arc(cx, oy + size / 2, size / 2, 0, Math.PI * 2)
-    ctx.strokeStyle = '#E6E6F0'
-    ctx.lineWidth = Math.max(1, dp(1))
-    ctx.stroke()
-    drawGuestIcon(ctx, cx - dp(12), oy + dp(12), dp(24))
-    ctx.fillStyle = GRAY5
-    ctx.font = fontRegular(dp(13))
-    ctx.textAlign = 'center'
-    ctx.fillText('游客登录', cx, oy + size + dp(28))
-    this.hit(cx - dp(40), oy, dp(80), size + dp(40), 'login-guest', () => {
-      this.ensureAgree(() => this.submitGuest())
-      return null
-    })
-    if (this.lastMethod === 'guest') this.lastBubble(ctx, cx, oy)
+    if (guestLoginOpen()) {
+      ctx.beginPath()
+      ctx.arc(cx, oy + size / 2, size / 2, 0, Math.PI * 2)
+      ctx.strokeStyle = '#E6E6F0'
+      ctx.lineWidth = Math.max(1, dp(1))
+      ctx.stroke()
+      drawGuestIcon(ctx, cx - dp(12), oy + dp(12), dp(24))
+      ctx.fillStyle = GRAY5
+      ctx.font = fontRegular(dp(13))
+      ctx.textAlign = 'center'
+      ctx.fillText('游客登录', cx, oy + size + dp(28))
+      this.hit(cx - dp(40), oy, dp(80), size + dp(40), 'login-guest', () => {
+        this.ensureAgree(() => this.submitGuest())
+        return null
+      })
+      if (this.lastMethod === 'guest') this.lastBubble(ctx, cx, oy)
+    }
     this.agreementRow(ctx, y + h - dp(56), true)
   }
 
@@ -1376,7 +1404,7 @@ export class ProfilePane {
   }
 
   private submitGuest(): void {
-    if (this.loginBusy) return
+    if (this.loginBusy || !guestLoginOpen()) return
     if (!this.agreedLogin) {
       this.ensureAgree(() => this.submitGuest())
       return
@@ -2481,8 +2509,15 @@ export class ProfilePane {
       this.bindField(field, id, box.numeric)
       this.dress(field, box)
       field.style.display = 'block'
-      field.classList.toggle('on', document.activeElement === field)
-      if (document.activeElement !== field && field.value !== this.values[id]) field.value = this.values[id]
+      const active = document.activeElement === field
+      field.classList.toggle('on', active)
+      field.classList.toggle('has-value', active && this.values[id].length > 0)
+      const display = id === 'phone' ? spacedPhone(this.values[id]) : this.values[id]
+      if (active) {
+        if (field.value !== display) field.value = display
+      } else if (field.value !== this.values[id]) {
+        field.value = this.values[id]
+      }
     }
     document.getElementById('boluo-field')?.remove()
   }
@@ -2506,14 +2541,19 @@ export class ProfilePane {
     const sx = rect.width / Math.max(1, this.frame.pw)
     const sy = rect.height / Math.max(1, this.frame.ph)
     this.pin(el, box.x, box.y, box.w, box.h)
-    // iOS zooms and throws the caret when a focused field is under 16px,
-    // and with user-scalable=no that zoom is what swallows the keyboard.
-    const cssFont = Math.max(16, box.font * sy)
-    el.style.fontSize = `${cssFont}px`
+    // Match Android title18R: 18sp glyphs, 24sp line, centered in the row.
+    // Do not bump the size; a larger font is what made the hint look blown up.
+    const fontPx = box.font * sy
+    el.style.fontSize = `${fontPx}px`
     el.style.fontWeight = String(box.weight)
     if (box.multiline) {
       el.style.padding = `${28 * sy}px ${28 * sx}px`
       el.style.lineHeight = `${58 * sy}px`
+    } else if (box.weight === 400) {
+      const linePx = fontPx * (24 / 18)
+      const padY = Math.max(0, (box.h * sy - linePx) / 2)
+      el.style.lineHeight = `${linePx}px`
+      el.style.padding = `${padY}px 0 ${padY}px ${box.pad * sx}px`
     } else {
       el.style.padding = `0 0 0 ${box.pad * sx}px`
       el.style.lineHeight = `${box.h * sy}px`
@@ -2525,20 +2565,21 @@ export class ProfilePane {
   }
 
   private bindField(el: HTMLInputElement | HTMLTextAreaElement, id: FieldId, numeric: boolean): void {
-    el.maxLength = maxOf(id)
+    el.maxLength = id === 'phone' ? 13 : maxOf(id)
     el.placeholder = ''
-    const box = this.boxes.find((item) => item.id === id)
-    if (box) el.placeholder = box.placeholder
     if (el instanceof HTMLInputElement) el.inputMode = numeric ? 'numeric' : 'text'
     el.oninput = () => {
+      const displayPos = el.selectionStart ?? el.value.length
+      const digitsBefore = id === 'phone'
+        ? el.value.slice(0, displayPos).replace(/\D/g, '').length
+        : displayPos
       this.applyField(id, el.value, numeric)
-      if (el.value !== this.values[id]) {
-        const pos = el.selectionStart
-        el.value = this.values[id]
-        if (pos != null) {
-          const n = Math.min(pos, el.value.length)
-          try { el.setSelectionRange(n, n) } catch { /* password fields reject a range */ }
-        }
+      el.classList.toggle('has-value', this.values[id].length > 0)
+      const shown = id === 'phone' ? spacedPhone(this.values[id]) : this.values[id]
+      if (el.value !== shown) {
+        el.value = shown
+        const caret = id === 'phone' ? phoneCaretToDisplay(Math.min(digitsBefore, this.values[id].length)) : Math.min(digitsBefore, shown.length)
+        try { el.setSelectionRange(caret, caret) } catch { /* password fields reject a range */ }
       }
     }
   }
@@ -2567,6 +2608,12 @@ export class ProfilePane {
     el.addEventListener('focus', () => {
       this.field = id
       el.classList.add('on')
+      el.classList.toggle('has-value', this.values[id].length > 0)
+      if (id === 'phone') {
+        const shown = spacedPhone(this.values[id])
+        if (el.value !== shown) el.value = shown
+        try { el.setSelectionRange(shown.length, shown.length) } catch { /* ignore */ }
+      }
       holdPage()
     })
     el.addEventListener('blur', () => {
@@ -2612,9 +2659,9 @@ function ensureFieldCss(): void {
     'box-sizing:border-box;border-radius:0;-webkit-appearance:none;appearance:none;',
     'color:transparent;-webkit-text-fill-color:transparent;caret-color:transparent;',
     'font-family:"PingFang SC","Hiragino Sans GB",sans-serif;touch-action:manipulation;text-align:left}',
-    '.boluo-field.on{color:#19191A;-webkit-text-fill-color:#19191A;caret-color:#19191A}',
-    '.boluo-field::placeholder{color:transparent}',
-    '.boluo-field.on::placeholder{color:#C4C4C7}',
+    '.boluo-field.on{caret-color:#00A375}',
+    '.boluo-field.on.has-value{color:#19191A;-webkit-text-fill-color:#19191A}',
+    '.boluo-field::placeholder{color:transparent;-webkit-text-fill-color:transparent}',
   ].join('')
   document.head.appendChild(style)
   window.addEventListener('scroll', () => {
@@ -2648,6 +2695,33 @@ function spacedPhone(value: string): string {
   if (digits.length <= 3) return digits
   if (digits.length <= 7) return `${digits.slice(0, 3)} ${digits.slice(3)}`
   return `${digits.slice(0, 3)} ${digits.slice(3, 7)} ${digits.slice(7)}`
+}
+
+/** Android PhoneNumberVisualTransformation.originalToTransformed. */
+function phoneCaretToDisplay(offset: number): number {
+  if (offset <= 3) return offset
+  if (offset <= 7) return offset + 1
+  return offset + 2
+}
+
+function drawInputClear(ctx: CanvasRenderingContext2D, x: number, y: number, size: number): void {
+  ctx.save()
+  ctx.translate(x, y)
+  ctx.scale(size / 24, size / 24)
+  ctx.fillStyle = '#C8C8CC'
+  ctx.beginPath()
+  ctx.arc(12, 12, 9, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.strokeStyle = '#fff'
+  ctx.lineWidth = 1.5
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(8.875, 8.875)
+  ctx.lineTo(15.125, 15.125)
+  ctx.moveTo(8.875, 15.125)
+  ctx.lineTo(15.125, 8.875)
+  ctx.stroke()
+  ctx.restore()
 }
 
 function font(px: number): string {

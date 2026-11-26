@@ -1,10 +1,29 @@
 import { build } from 'esbuild'
-import { mkdirSync, copyFileSync, cpSync, writeFileSync, statSync, rmSync, symlinkSync, existsSync } from 'fs'
+import { mkdirSync, copyFileSync, cpSync, writeFileSync, statSync, rmSync, existsSync, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const dist = join(root, 'dist')
+
+function loadEnvFile(file) {
+  if (!existsSync(file)) return
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const eq = trimmed.indexOf('=')
+    if (eq <= 0) continue
+    const key = trimmed.slice(0, eq).trim()
+    let value = trimmed.slice(eq + 1).trim()
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1)
+    }
+    if (process.env[key] === undefined) process.env[key] = value
+  }
+}
+
+loadEnvFile(join(root, '.env'))
+
 const envName = (process.argv.find((arg) => arg.startsWith('--env=')) || '--env=dev').slice('--env='.length)
 const envApi = {
   dev: 'https://wanos-common-dev.wanos.vip',
@@ -13,6 +32,15 @@ const envApi = {
 }
 if (!envApi[envName]) {
   console.error('BOLUO_ENV must be dev, test, or product')
+  process.exit(1)
+}
+// The public product build only plays local music and effects. It does not
+// embed a signing key or forward login.
+const signKey = envName === 'product'
+  ? ''
+  : (process.env.BOLUO_SIGN_KEY || process.env.BOLUO_SIGN_KEY_DEV || '')
+if (!signKey && envName !== 'product') {
+  console.error('Missing sign key. Set BOLUO_SIGN_KEY or BOLUO_SIGN_KEY_DEV in the environment or .env')
   process.exit(1)
 }
 rmSync(dist, { recursive: true, force: true })
@@ -26,62 +54,17 @@ await build({
   target: 'es2018',
   legalComments: 'none',
   minify: true,
-  define: { BOLUO_ENV: JSON.stringify(envName) },
+  define: {
+    BOLUO_ENV: JSON.stringify(envName),
+    BOLUO_SIGN_KEY: JSON.stringify(signKey),
+  },
 })
 writeFileSync(join(dist, 'boluo-env.json'), JSON.stringify({ env: envName, api: envApi[envName] }))
 
 copyFileSync(join(root, 'public/index.html'), join(dist, 'index.html'))
 cpSync(join(root, 'public/ui'), join(dist, 'ui'), { recursive: true })
-const ref = join(dist, 'ui', 'ref')
-const tex = join(root, '..', 'BoluoProjectNew', 'CustomSRP', 'Assets', 'GameMain', 'UI', 'Textures')
-const musicRes = join(root, '..', 'BoluoProjectNew', 'CustomSRP', 'Assets', 'GameMain', 'Resources', 'MusicForm')
-const sceneRes = join(root, '..', 'BoluoProjectNew', 'AndroidProject', 'feature-scene', 'src', 'main')
-const mineRes = join(root, '..', 'BoluoProjectNew', 'AndroidProject', 'feature-mine', 'src', 'main', 'res', 'drawable')
-const link = (from, to) => {
-  mkdirSync(dirname(to), { recursive: true })
-  symlinkSync(from, to)
-}
-link(join(tex, 'Shared', 'panel-r147.png'), join(ref, 'panel.png'))
-link(join(tex, 'Shared', 'dian.png'), join(ref, 'dian.png'))
-link(join(tex, 'VolumeRow', 'track-plate.png'), join(ref, 'track.png'))
-link(join(tex, 'VolumeRow', 'fill.png'), join(ref, 'fill.png'))
-link(join(tex, 'MusicForm', 'music-dialogkapian.png'), join(ref, 'music-card.png'))
-link(join(tex, 'MusicForm', 'yy_huadongtiao.png'), join(ref, 'yy_huadongtiao.png'))
-for (const name of ['yy_danqu', 'yy_list', 'yy_suiji', 'MusicNotDownload', 'MusicError']) {
-  link(join(musicRes, `${name}.png`), join(ref, `${name}.png`))
-}
-link(join(musicRes, 'Playing'), join(ref, 'playing'))
-for (let i = 1; i <= 10; i++) link(join(tex, 'PresetItem', `zhanweitu${i}.png`), join(ref, `zhanweitu${i}.png`))
-for (const name of ['bofangzhuangtai', 'statewaitdownload', 'stateerror', 'statedownloadsuccess', 'stateready']) {
-  link(join(tex, 'PresetItem', `${name}.png`), join(ref, `${name}.png`))
-}
-link(join(tex, 'IslandMainForm', 'music-icon.png'), join(ref, 'music-icon.png'))
-link(join(tex, 'HudIcon', 'timer-idle.png'), join(ref, 'timer-idle.png'))
-link(join(tex, 'HudIcon', 'dial-spin.png'), join(ref, 'dial-spin.png'))
-link(join(tex, 'HudIcon', 'top-rule.png'), join(ref, 'top-rule.png'))
-link(join(tex, 'HudIcon', 'top-right-decor.png'), join(ref, 'top-right-decor.png'))
-link(join(tex, 'HudIcon', 'volume-track.png'), join(ref, 'volume-track.png'))
-link(join(tex, 'HudIcon', 'volume-track1.png'), join(ref, 'volume-fill.png'))
-link(join(tex, 'HudIcon', 'effectvolumeyuan.png'), join(ref, 'volume-dot.png'))
-link(join(tex, 'LoadingForm', 'background.png'), join(ref, 'loading-track.png'))
-link(join(tex, 'LoadingForm', 'fill.png'), join(ref, 'loading-fill.png'))
-link(join(tex, 'PresetForm', 'scroll-track.png'), join(ref, 'scroll-track.png'))
-link(join(tex, 'PresetForm', 'scroll-track-active.png'), join(ref, 'scroll-track-active.png'))
-for (const name of ['bgkuang', 'morendian', 'guanbi', 'shezhidingshib', 'shezhidingshiweidianliang']) {
-  link(join(sceneRes, 'res', 'drawable', `${name}.png`), join(ref, `${name}.png`))
-}
-link(join(sceneRes, 'assets', 'timer', 'dingshi_wave_base.svg'), join(ref, 'wave-base.svg'))
-link(join(sceneRes, 'assets', 'timer', 'dingshi_wave_active.svg'), join(ref, 'wave-active.svg'))
-link(join(sceneRes, 'res', 'font', 'sf_pro_rounded_heavy.ttf'), join(ref, 'sf-pro-rounded-heavy.ttf'))
-link(join(mineRes, 'mine_ic_avatar_ring.png'), join(ref, 'avatar-ring.png'))
-link(join(mineRes, 'mine_ic_app_logo.png'), join(ref, 'app-logo.png'))
-link(join(mineRes, 'mine_ic_guest_heart.png'), join(dist, 'ui', 'mine', 'guest-heart.png'))
-const boot = join(dist, 'boot')
-mkdirSync(boot, { recursive: true })
-const videoDir = join(root, '..', 'BoluoProjectNew', 'CustomSRP', 'Assets', 'GameMain', 'UI', 'Video')
-for (const name of ['loading.mp4', 'loading_landscape.mp4']) {
-  symlinkSync(join(videoDir, name), join(boot, name))
-}
+const bootSrc = join(root, 'public/boot')
+if (existsSync(bootSrc)) cpSync(bootSrc, join(dist, 'boot'), { recursive: true })
 mkdirSync(join(dist, 'oil'), { recursive: true })
 cpSync(join(root, 'public/oil'), join(dist, 'oil'), { recursive: true })
 // Mesh bin is only for tooling; runtime embeds boluo1 in game.js.

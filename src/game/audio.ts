@@ -1,6 +1,7 @@
-import type { AudioClip, Host, SpatialVoice } from '../host/types'
+import type { AudioClip, Host, MusicVoice, SpatialVoice } from '../host/types'
 import { BANKS, CLIPS, grassClip, weatherClip } from './catalog'
 import { ambienceFor, type AmbienceBed } from '../scene/world'
+import { CAMPFIRE_X, CAMPFIRE_Z, FIRE_FULL, FIRE_REACH } from '../scene/campfire'
 import type { SceneKind } from '../scene/island'
 import type { WeatherKind } from './catalog'
 
@@ -32,19 +33,32 @@ export class Ambience {
   private uncovered = false
   private paused = false
   private clips = new Map<string, AudioClip>()
+  private pending = new Map<string, ArrayBuffer>()
+  private failedAt = new Map<string, number>()
   private loading = new Set<string>()
   private musicName = ''
-  private musicVoice: SpatialVoice | null = null
+  private song: MusicVoice
   private musicElapsed = 0
   private musicMark = 0
   private musicDuration = 0
+  /** True after the current file has actually started. The wall clock waits for this. */
+  private musicHeard = false
   private levelArmed = false
+  /** Period used to start the grass bed before the world is uncovered. */
+  private bedPeriod = 0
   /** Fires once when the selected level's clip actually starts. */
   onLevelStart: ((seconds: number) => void) | null = null
   private beds = new Map<string, { src: string; voice: SpatialVoice }>()
+  /** 0 cold, 1 fully lit. The clip only plays while the pile is burning. */
+  private flame = 0
+  private flameVoice: SpatialVoice | null = null
+  private flameSrc = BANKS.find((b) => b.name === 'Campfire')?.src ?? ''
 
   constructor(private host: Host) {
+    this.song = host.music()
     this.zones = this.bind('meadow')
+    // Effects do not wait for a dialog or a tap. Resume as soon as the context exists.
+    this.host.webAudio()?.resume()
   }
 
   private bind(scene: SceneKind): BedRuntime[] {
@@ -63,13 +77,20 @@ export class Ambience {
   setVolumes(music: number, fx: number): void {
     this.musicGain = music
     this.fxGain = fx
-    this.musicVoice?.setGain(this.musicGain)
+    // Music is a media element. Effects stay on WebAudio gains, including beeps.
+    this.song.setVolume(this.musicGain)
+    this.host.webAudio()?.setFxVolume(this.fxGain)
+  }
+
+  /** Night ignition, already eased. 0 keeps the pile silent. */
+  setFlame(level: number): void {
+    this.flame = Math.max(0, Math.min(1, level))
   }
 
   /** Empty name stops the track. Only one music voice is ever running. */
   setMusic(name: string): void {
     if (name === this.musicName) {
-      this.musicVoice?.setGain(this.musicGain)
+      this.song.setVolume(this.musicGain)
       return
     }
     this.musicName = name
@@ -77,26 +98,71 @@ export class Ambience {
     this.musicElapsed = 0
     this.musicDuration = 0
     this.levelArmed = false
-    const src = BANKS.find((b) => b.name === name)?.src
-    if (src) this.clip(src)
+    this.startSong(name)
   }
 
-  /** Restart a track as a level, even when it is already the current song. Plays once. */
-  playLevel(name: string): void {
+  /**
+   * Restart a track from the beginning.
+   * `tour` arms the step round for the moment the clip actually starts.
+   */
+  playMusic(name: string, tour: boolean): void {
+    this.levelArmed = false
     this.musicName = ''
     this.stopMusic()
     this.musicElapsed = 0
     this.musicMark = 0
     this.musicDuration = 0
-    this.levelArmed = true
+    if (!name) return
+    this.levelArmed = tour
     this.musicName = name
-    const src = BANKS.find((b) => b.name === name)?.src
-    if (src) this.clip(src)
+    this.startSong(name)
   }
 
-  /** Advance the song clock only while the context is actually playing. */
+  /**
+   * Seconds into the file. The element clock wins once it is moving,
+   * so a landing stays on the beat you hear. The wall clock covers the
+   * moment before the element reports a position.
+   */
+  songSeconds(): number {
+    if (!this.musicHeard) return 0
+    const at = this.song.position()
+    if (at > 0.02) return at
+    return this.musicElapsed / 1000
+  }
+
+  /** Drop a tour arm if the song has not started yet. */
+  cancelLevel(): void {
+    this.levelArmed = false
+  }
+
+  /** One shot when the current clip reaches its end. The voice is dropped. */
+  takeEnded(): boolean {
+    if (!this.songOver()) return false
+    this.musicDuration = 0
+    this.stopMusic()
+    return true
+  }
+
+  /** Advance the song clock only while playback is actually running. */
   tickMusic(now: number, running: boolean): void {
-    if (!this.musicDuration || !this.musicVoice) {
+    if (!this.musicHeard) {
+      if (this.musicName && this.song.started()) {
+        const dur = this.song.duration()
+        if (dur > 0) {
+          this.musicHeard = true
+          this.musicDuration = dur
+          this.musicElapsed = 0
+          this.musicMark = now
+          if (this.levelArmed) {
+            this.levelArmed = false
+            this.onLevelStart?.(dur)
+          }
+        }
+      }
+      this.musicMark = now
+      return
+    }
+    if (!this.musicDuration) {
       this.musicMark = now
       return
     }
@@ -105,39 +171,63 @@ export class Ambience {
   }
 
   songOver(): boolean {
-    return this.musicDuration > 0 && !!this.musicVoice && this.musicElapsed >= this.musicDuration * 1000
+    return this.musicHeard && this.musicDuration > 0 && this.musicElapsed >= this.musicDuration * 1000
+  }
+
+  private startSong(name: string): void {
+    const src = BANKS.find((b) => b.name === name)?.src
+    if (!src) return
+    this.song.setVolume(this.musicGain)
+    this.song.load(src, true)
+  }
+
+  /** Start the song file while the loading page is still up. Playback waits for uncover(). */
+  warmTrack(name: string): void {
+    const src = BANKS.find((b) => b.name === name)?.src
+    if (src) this.song.warm(src)
   }
 
   private stopMusic(): void {
-    this.musicVoice?.stop()
-    this.musicVoice = null
+    this.musicHeard = false
+    this.song.stop()
   }
 
   uncover(): void {
     this.uncovered = true
     this.host.webAudio()?.resume()
+    if (this.musicName) this.song.resume()
   }
 
-  /** Start the cued track as soon as the context is allowed to play, including during boot. */
+  /** Start the bed download before the context is allowed to play. */
+  prime(period: number): void {
+    this.bedPeriod = ((period % 4) + 4) % 4
+    this.host.webAudio()?.resume()
+    this.clip(grassClip(this.bedPeriod, 'clear'))
+    if (this.flameSrc) this.clip(this.flameSrc)
+  }
+
+  /**
+   * Warm the context and the grass clip while the loading page is up.
+   * Beds stay silent until uncover(), which waits for that page to hide.
+   */
   pump(): void {
-    if (this.paused) return
+    if (this.paused || this.uncovered) return
     const web = this.host.webAudio()
-    if (!web) return
-    if (!web.running()) {
-      web.resume()
-      return
-    }
-    this.syncMusic(web, this.host.now())
+    if (web && !web.running()) web.resume()
+    this.clip(grassClip(this.bedPeriod, 'clear'))
   }
 
   pause(): void {
     this.paused = true
     this.host.webAudio()?.suspend()
+    this.song.pause()
   }
 
   resume(): void {
     this.paused = false
-    if (this.uncovered) this.host.webAudio()?.resume()
+    if (!this.uncovered) return
+    this.host.webAudio()?.resume()
+    if (this.musicName) this.song.resume()
   }
 
   update(
@@ -153,13 +243,16 @@ export class Ambience {
     period: number,
   ): void {
     if (!this.uncovered || this.paused) return
+    // Download even while autoplay is blocked, so the first tap is not silent.
+    this.clip(grassClip(period, weather))
     const web = this.host.webAudio()
     if (web && !web.running()) {
       web.resume()
+      this.syncMusic()
       return
     }
     web?.setListener(x, y, z, fx, fy, fz)
-    this.syncMusic(web, now)
+    this.syncMusic()
     let nearWater = false
     let best: BedRuntime | null = null
     let bestGain = 0
@@ -205,24 +298,14 @@ export class Ambience {
     this.syncBed(web, 'wind', windSrc, this.fxGain * 0.7)
     this.syncBed(web, 'rain', rainSrc, this.fxGain * 0.75)
     this.syncBed(web, 'rain-water', waterSrc, this.fxGain * 0.45)
+    this.syncFlame(web, x, z)
   }
 
-  private syncMusic(web: ReturnType<Host['webAudio']>, now: number): void {
-    if (!this.musicName || this.musicVoice || !web) return
-    const name = this.musicName
-    const src = BANKS.find((b) => b.name === name)?.src
-    if (!src) return
-    const clip = this.clip(src)
-    if (!clip || this.musicName !== name || this.musicVoice) return
-    this.stopMusic()
-    this.musicVoice = web.playClip(clip, false, false, 0, 0, 0, 1, 1)
-    this.musicVoice.setGain(this.musicGain)
-    this.musicDuration = clip.duration
-    this.musicElapsed = 0
-    this.musicMark = now
-    if (!this.levelArmed) return
-    this.levelArmed = false
-    this.onLevelStart?.(clip.duration)
+  /** Retry the playlist element until a gesture lets it start. Effects stay on `web`. */
+  private syncMusic(): void {
+    if (!this.musicName || this.paused) return
+    this.song.setVolume(this.musicGain)
+    this.song.resume()
   }
 
   private syncBed(web: ReturnType<Host['webAudio']>, key: string, src: string, gain: number): void {
@@ -249,14 +332,30 @@ export class Ambience {
   private clip(src: string): AudioClip | null {
     const cached = this.clips.get(src)
     if (cached) return cached
-    if (this.loading.has(src)) return null
-    const web = this.host.webAudio()
-    if (!web) return null
+    const buf = this.pending.get(src)
+    const web = buf ? this.host.webAudio() : null
+    if (buf && web && !this.loading.has(src)) {
+      this.loading.add(src)
+      void web.decode(buf).then((decoded) => {
+        this.clips.set(src, decoded)
+        this.pending.delete(src)
+        this.loading.delete(src)
+      }).catch(() => {
+        this.pending.delete(src)
+        this.failedAt.set(src, Date.now())
+        this.loading.delete(src)
+      })
+    }
+    if (buf || this.loading.has(src)) return null
+    const failed = this.failedAt.get(src) ?? 0
+    if (failed && Date.now() - failed < 2500) return null
     this.loading.add(src)
-    void this.host.download(src).then((buf) => web.decode(buf)).then((decoded) => {
-      this.clips.set(src, decoded)
+    void this.host.download(src).then((data) => {
+      this.pending.set(src, data)
       this.loading.delete(src)
+      this.clip(src)
     }).catch(() => {
+      this.failedAt.set(src, Date.now())
       this.loading.delete(src)
     })
     return null
@@ -266,8 +365,27 @@ export class Ambience {
     this.stopZones()
     this.musicName = ''
     this.stopMusic()
+    this.flameVoice?.stop()
+    this.flameVoice = null
     for (const bed of this.beds.values()) bed.voice.stop()
     this.beds.clear()
+  }
+
+  /** Horizontal falloff from the pile. The voice is not spatial, so the curve is not applied twice. */
+  private syncFlame(web: ReturnType<Host['webAudio']>, x: number, z: number): void {
+    if (!this.flameSrc) return
+    const dist = Math.hypot(x - CAMPFIRE_X, z - CAMPFIRE_Z)
+    const heard = this.fxGain * distanceGain(dist, FIRE_FULL, FIRE_REACH, 0) * this.flame
+    if (heard <= 0.0008) {
+      this.flameVoice?.stop()
+      this.flameVoice = null
+      return
+    }
+    if (!this.flameVoice && web) {
+      const clip = this.clip(this.flameSrc)
+      if (clip) this.flameVoice = web.playClip(clip, true, false, 0, 0, 0, 1, 1)
+    }
+    this.flameVoice?.setGain(heard)
   }
 
   private stopZones(): void {
